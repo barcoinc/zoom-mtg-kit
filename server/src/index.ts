@@ -52,7 +52,8 @@ const API = 'https://api.zoom.us/v2';
 // 共通
 // ─────────────────────────────────────────────
 
-async function getAccessToken(): Promise<string> {
+/** トークンと、そのトークンに実際に付与されているスコープ一覧 */
+async function getTokenInfo(): Promise<{ token: string; scopes: string[] }> {
   const credentials = Buffer.from(
     `${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}`
   ).toString('base64');
@@ -63,7 +64,14 @@ async function getAccessToken(): Promise<string> {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
   });
-  return res.data.access_token;
+  return {
+    token: res.data.access_token,
+    scopes: String(res.data.scope || '').split(/\s+/).filter(Boolean),
+  };
+}
+
+async function getAccessToken(): Promise<string> {
+  return (await getTokenInfo()).token;
 }
 
 /** Zoom APIのエラーを、原因と対処が分かる日本語にして投げ直す */
@@ -440,6 +448,143 @@ async function deleteRecording(meetingUuid: string) {
 }
 
 // ─────────────────────────────────────────────
+// 自己診断
+// ─────────────────────────────────────────────
+
+/** 機能ごとに必要なスコープ。Zoomは末尾の :admin が付いたり付かなかったりする */
+const FEATURE_SCOPES: { feature: string; tools: string; scopes: string[] }[] = [
+  { feature: 'ミーティングを作る', tools: 'create-meeting', scopes: ['meeting:write:meeting'] },
+  { feature: 'ミーティングを読む', tools: 'get-meeting', scopes: ['meeting:read:meeting'] },
+  { feature: 'ミーティング一覧', tools: 'list-meetings', scopes: ['meeting:read:list_meetings'] },
+  { feature: '設定変更（自動録画）', tools: 'update-meeting', scopes: ['meeting:update:meeting'] },
+  { feature: '録画一覧', tools: 'list-recordings / download-recordings / get-share-link', scopes: ['cloud_recording:read:list_user_recordings'] },
+  { feature: '文字起こしの取得', tools: 'download-recordings', scopes: ['cloud_recording:read:meeting_transcript', 'cloud_recording:read:list_user_recordings'] },
+  { feature: '共有設定の変更', tools: 'set-share-settings', scopes: ['cloud_recording:update:recording_settings'] },
+  { feature: '録画の削除', tools: 'delete-recording', scopes: ['cloud_recording:delete:recording_file'] },
+];
+
+/** :admin の有無を無視してスコープを保持しているか判定する */
+function hasScope(granted: string[], want: string): boolean {
+  const norm = (s: string) => s.replace(/:admin$/, '');
+  return granted.some((g) => norm(g) === norm(want));
+}
+
+async function runDoctor(): Promise<string> {
+  const lines: string[] = ['Zoom MTG Kit 自己診断', ''];
+  let fatal = false;
+
+  // 1. 認証情報
+  lines.push('【1】認証情報');
+  const envs = {
+    ZOOM_ACCOUNT_ID,
+    ZOOM_CLIENT_ID,
+    ZOOM_CLIENT_SECRET,
+    ZOOM_USER_EMAIL,
+  };
+  for (const [k, v] of Object.entries(envs)) {
+    lines.push(`  ${v ? 'OK ' : 'NG '} ${k}${v ? '' : ' … .env.local に未設定'}`);
+  }
+  lines.push('');
+
+  // 2. 認証が通るか
+  lines.push('【2】Zoomへの接続');
+  let scopes: string[] = [];
+  let token = '';
+  try {
+    const info = await getTokenInfo();
+    token = info.token;
+    scopes = info.scopes;
+    lines.push('  OK  アクセストークンを取得できました');
+    lines.push(`      付与スコープ ${scopes.length}件`);
+  } catch (e) {
+    fatal = true;
+    lines.push('  NG  トークンを取得できません');
+    lines.push('      → Account ID / Client ID / Client Secret が正しいか確認してください');
+    lines.push('      → Zoom Marketplace でアプリが Activate 済みか確認してください');
+    lines.push(`      （${e instanceof Error ? e.message : String(e)}）`);
+    return lines.join('\n');
+  }
+  lines.push('');
+
+  // 3. スコープ
+  lines.push('【3】権限（スコープ）');
+  const missing: string[] = [];
+  for (const f of FEATURE_SCOPES) {
+    const lack = f.scopes.filter((s) => !hasScope(scopes, s));
+    if (lack.length === 0) {
+      lines.push(`  OK  ${f.feature}`);
+    } else {
+      lines.push(`  NG  ${f.feature}（${f.tools} が使えません）`);
+      lack.forEach((s) => {
+        lines.push(`      不足: ${s}`);
+        missing.push(s);
+      });
+    }
+  }
+  if (missing.length) {
+    lines.push('');
+    lines.push('  → Zoom Marketplace → 該当アプリ → Scopes で上記を追加し、');
+    lines.push('    Activation タブで再アクティベートしてください。');
+  }
+  lines.push('');
+
+  // 4. 音声文字起こしがONか（過去の録画から判定）
+  lines.push('【4】音声文字起こしの設定');
+  if (!hasScope(scopes, 'cloud_recording:read:list_user_recordings')) {
+    lines.push('  ?   録画一覧の権限が無いため判定できません（【3】を先に解決してください）');
+  } else {
+    try {
+      const recs = await listRecordings(10, 3);
+      if (recs.length === 0) {
+        lines.push('  ?   直近3ヶ月に録画が無いため判定できません');
+        lines.push('      → 3分ほどテスト録画をしてから、もう一度この診断を実行してください');
+      } else {
+        const withTranscript = recs.filter((r) =>
+          r.recording_files.some((f) => f.file_type === 'TRANSCRIPT')
+        );
+        const done = recs.filter((r) => r.recording_files.some((f) => f.file_size > 0));
+        if (withTranscript.length > 0) {
+          lines.push(`  OK  文字起こしが作られています（直近${recs.length}件中 ${withTranscript.length}件）`);
+        } else if (done.length === 0) {
+          lines.push('  ?   録画がまだZoom側で変換中です（60分の会議で30〜60分かかります）');
+        } else {
+          lines.push('  NG  録画はあるのに文字起こしがありません');
+          lines.push('      → https://zoom.us/profile/setting の「記録」タブで');
+          lines.push('        「詳細クラウド記録設定」→「音声文字起こしを作成」にチェックを入れてください');
+          lines.push('      ※ 設定を入れる前に録った分には、後から文字起こしは作られません');
+        }
+        lines.push(`      （クラウド録画が存在するので、有料プランの条件は満たしています）`);
+      }
+    } catch (e) {
+      lines.push(`  ?   判定できませんでした（${e instanceof Error ? e.message : String(e)}）`);
+    }
+  }
+  lines.push('');
+
+  // 5. 保存先
+  lines.push('【5】ダウンロード保存先');
+  try {
+    if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+    fs.accessSync(DOWNLOAD_DIR, fs.constants.W_OK);
+    lines.push(`  OK  ${DOWNLOAD_DIR}`);
+  } catch {
+    fatal = true;
+    lines.push(`  NG  ${DOWNLOAD_DIR} に書き込めません`);
+    lines.push('      → ZOOM_DOWNLOAD_DIR で別の場所を指定できます');
+  }
+  lines.push('');
+
+  // まとめ
+  lines.push('─'.repeat(40));
+  if (!missing.length && !fatal) {
+    lines.push('すべて問題ありません。使い始められます。');
+  } else {
+    lines.push('上の NG を解消してから、もう一度この診断を実行してください。');
+  }
+  return lines.join('\n');
+}
+
+// ─────────────────────────────────────────────
 // MCPサーバー
 // ─────────────────────────────────────────────
 
@@ -449,6 +594,12 @@ const server = new Server(
 );
 
 const tools = [
+  {
+    name: 'doctor',
+    description:
+      'セットアップの自己診断。認証情報・接続・権限（スコープ）・音声文字起こしの設定・保存先を順にチェックし、足りないものを名指しで返す。うまく動かない時は最初にこれを実行する。',
+    inputSchema: { type: 'object', properties: {} },
+  },
   {
     name: 'create-meeting',
     description:
@@ -579,6 +730,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      case 'doctor': {
+        return { content: [{ type: 'text', text: await runDoctor() }] };
+      }
+
       case 'create-meeting': {
         const m = await createMeeting(args ?? {});
         const kind = m.recurring ? `毎週${m.weekdayLabel}曜の定期` : '単発';

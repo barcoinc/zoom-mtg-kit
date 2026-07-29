@@ -65,10 +65,11 @@
 | ミーティング一覧 | `meeting:read:list_meetings:admin` |
 | 設定変更（自動録画のON/OFF） | `meeting:update:meeting:admin` |
 | 録画一覧 | `cloud_recording:read:list_user_recordings:admin` |
+| 文字起こしの取得 | `cloud_recording:read:meeting_transcript:admin` |
 | 録画ファイルの取得 | `cloud_recording:read:list_recording_files:admin` |
 | 共有設定を読む | `cloud_recording:read:recording_settings:admin` |
 | 共有設定を変える（パスコード解除など） | `cloud_recording:update:recording_settings:admin` |
-| 録画の削除 | `cloud_recording:delete:meeting_recording:admin` |
+| 録画の削除 | `cloud_recording:delete:recording_file:admin` |
 
 > スコープ名はZoomの画面のバージョンによって表記が少し違います（`:admin` が付かないものもあります）。
 > **`meeting` と `recording` で検索して、read / write / update / delete が付くものを一通りチェック**すれば確実です。
@@ -119,6 +120,13 @@ Claude Codeを再起動し、`/mcp` と打って `zoom-mtg-kit` が出てくれ�
 ## 5. 動作確認
 
 Claude Codeで、そのまま日本語で話しかけます。
+
+```
+doctor を実行して
+```
+
+認証・権限・文字起こし設定・保存先を順にチェックし、**足りないものを名指しで**返します。
+すべてOKになったら、次を試します。
 
 ```
 Zoomの録画一覧を見せて
