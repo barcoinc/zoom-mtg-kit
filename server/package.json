@@ -1,0 +1,26 @@
+{
+  "name": "zoom-mtg-kit",
+  "version": "2.0.0",
+  "description": "Zoomの定期ミーティング作成・クラウド録画・文字起こし取得をClaude Codeから扱うMCPサーバー",
+  "type": "module",
+  "bin": {
+    "zoom-mtg-kit": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    ".env.local.example"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.6.0",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,0 +1,15 @@
+# 認証情報。これが漏れると全録画にアクセスされる
+**/.env.local
+**/.env
+
+# ビルド成果物と依存
+server/node_modules/
+server/dist/
+
+# 議事録・文字起こし（機微情報を含むため絶対に上げない）
+clients/*/meetings/
+*.vtt
+
+# OS
+.DS_Store
+Thumbs.db
