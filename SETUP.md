@@ -56,18 +56,25 @@
 
 **Scopes** タブ → **Add Scopes** で、以下を追加します。
 
-| 何のため | 探すキーワード | スコープ名 |
-|---|---|---|
-| ミーティングを作る | meeting | `meeting:write:meeting:admin` |
-| ミーティングを読む（URL・日時・パスコード） | meeting | `meeting:read:meeting:admin` |
-| ミーティング一覧 | meeting | `meeting:read:list_meetings:admin` |
-| 設定を変える（自動録画のON/OFF） | meeting | `meeting:update:meeting:admin` |
-| 録画一覧・ダウンロード | recording | 録画の read 系すべて |
-| 録画の削除 | recording | 録画の delete / write 系 |
+検索ボックスに `meeting` / `recording` と入れて、以下を探してチェックします。
 
-> Zoomの画面のバージョンによってスコープ名の表記が少し違います。**検索ボックスに `meeting` と `recording` と入れて、read / write / update / delete が付くものを一通りチェック**すれば確実です。
+| 何のため | スコープ名 |
+|---|---|
+| ミーティングを作る | `meeting:write:meeting:admin` |
+| ミーティングを読む（URL・パスコード・日時） | `meeting:read:meeting:admin` |
+| ミーティング一覧 | `meeting:read:list_meetings:admin` |
+| 設定変更（自動録画のON/OFF） | `meeting:update:meeting:admin` |
+| 録画一覧 | `cloud_recording:read:list_user_recordings:admin` |
+| 録画ファイルの取得 | `cloud_recording:read:list_recording_files:admin` |
+| 共有設定を読む | `cloud_recording:read:recording_settings:admin` |
+| 共有設定を変える（パスコード解除など） | `cloud_recording:update:recording_settings:admin` |
+| 録画の削除 | `cloud_recording:delete:meeting_recording:admin` |
+
+> スコープ名はZoomの画面のバージョンによって表記が少し違います（`:admin` が付かないものもあります）。
+> **`meeting` と `recording` で検索して、read / write / update / delete が付くものを一通りチェック**すれば確実です。
 >
 > **最初から全部入れておいてください。** あとから足すこともできますが、そのたびにアプリの再アクティベートが必要になります。
+> なお不足している場合は、このキットが**足りないスコープ名を名指しで教えてくれる**ので、それを見て追加すれば大丈夫です。
 
 ### 2-4. アプリを有効化
 

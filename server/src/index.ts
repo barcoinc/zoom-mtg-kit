@@ -323,6 +323,107 @@ async function downloadFile(url: string, fileName: string, token: string) {
   return filePath;
 }
 
+/**
+ * Zoom APIのパスに使うIDを組み立てる。
+ * 数値のミーティングIDはそのまま、uuidは二重URLエンコードする（Zoomの仕様）。
+ */
+function meetingPathId(idOrUuid: string): string {
+  if (/^\d+$/.test(idOrUuid)) return idOrUuid;
+  return encodeURIComponent(encodeURIComponent(idOrUuid));
+}
+
+interface ShareInfo {
+  topic: string;
+  shareUrl: string;
+  passcode: string;
+  startTime: string;
+  duration: number;
+  totalSize: number;
+  playUrl?: string;
+}
+
+/**
+ * 録画の共有リンク（Loomのように相手に見せるURL）を取得する。
+ * recording:read で取得できる。
+ */
+async function getShareInfo(idOrUuid: string): Promise<ShareInfo> {
+  const token = await getAccessToken();
+
+  const toShareInfo = (m: any): ShareInfo => {
+    const mp4 = (m.recording_files || []).find((f: any) => f.file_type === 'MP4');
+    return {
+      topic: m.topic,
+      shareUrl: m.share_url,
+      passcode: m.recording_play_passcode || m.password || '',
+      startTime: m.start_time,
+      duration: m.duration,
+      totalSize: m.total_size,
+      playUrl: mp4?.play_url,
+    };
+  };
+
+  // まず単一ミーティングのエンドポイントを試す。
+  // これは cloud_recording:read:list_recording_files が要るので、
+  // 権限が無い場合はユーザーの録画一覧から探すほうにフォールバックする
+  // （一覧側にも share_url は含まれており、必要な権限が少なくて済む）。
+  try {
+    const res = await axios.get(
+      `${API}/meetings/${meetingPathId(idOrUuid)}/recordings`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    return toShareInfo(res.data);
+  } catch (e) {
+    const isScopeError =
+      axios.isAxiosError(e) && (e.response?.data as any)?.code === 4711;
+    if (!isScopeError) rethrow(e, '共有リンクの取得エラー');
+  }
+
+  // フォールバック: 直近12ヶ月の録画一覧から ID / uuid が一致するものを探す
+  const recordings = await listRecordings(500, 12);
+  const hit = recordings.find(
+    (r) => String(r.id) === idOrUuid || r.uuid === idOrUuid
+  );
+  if (!hit) {
+    throw new Error(
+      `共有リンクの取得エラー: ${idOrUuid} に該当する録画が見つかりませんでした。` +
+        `list-recordings で ID または uuid を確認してください。`
+    );
+  }
+  return toShareInfo(hit);
+}
+
+/**
+ * 録画の共有設定を変更する。
+ * cloud_recording:update:recording_settings が必要。
+ */
+async function updateShareSettings(
+  idOrUuid: string,
+  patch: {
+    share?: 'publicly' | 'internally' | 'none';
+    removePasscode?: boolean;
+    allowDownload?: boolean;
+    requireSignIn?: boolean;
+  }
+) {
+  const token = await getAccessToken();
+  const body: Record<string, unknown> = {};
+  if (patch.share) body.share_recording = patch.share;
+  if (patch.removePasscode) body.password = ''; // 空文字でパスコード解除
+  if (patch.allowDownload !== undefined) body.viewer_download = patch.allowDownload;
+  if (patch.requireSignIn !== undefined)
+    body.recording_authentication = patch.requireSignIn;
+  try {
+    await axios.patch(
+      `${API}/meetings/${meetingPathId(idOrUuid)}/recordings/settings`,
+      body,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    return true;
+  } catch (e) {
+    rethrow(e, '共有設定の更新エラー');
+  }
+}
+
 /** 録画の削除。ゴミ箱に入るので30日以内なら復元可能。recording:write が必要 */
 async function deleteRecording(meetingUuid: string) {
   const token = await getAccessToken();
@@ -419,6 +520,41 @@ const tools = [
         count: { type: 'number', default: 2 },
         transcriptOnly: { type: 'boolean', description: 'VTTのみ取得しMP4/M4Aをスキップ', default: false },
       },
+    },
+  },
+  {
+    name: 'get-share-link',
+    description:
+      '録画の共有リンクを取得する（Loomのように相手にURLで見せる用）。視聴用パスコードも一緒に返し、そのまま貼れる文面を作る。要スコープ: recording:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        meetingId: {
+          type: 'string',
+          description: 'ミーティングID、または list-recordings が返す uuid',
+        },
+      },
+      required: ['meetingId'],
+    },
+  },
+  {
+    name: 'set-share-settings',
+    description:
+      '録画の共有設定を変える。パスコード無しで誰でも見られる状態にしたい時に使う。要スコープ: cloud_recording:update:recording_settings',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        meetingId: { type: 'string', description: 'ミーティングID または uuid' },
+        share: {
+          type: 'string',
+          enum: ['publicly', 'internally', 'none'],
+          description: 'publicly=リンクを知っていれば誰でも / internally=同一組織のみ / none=共有停止',
+        },
+        removePasscode: { type: 'boolean', description: 'true で視聴パスコードを解除する' },
+        allowDownload: { type: 'boolean', description: '視聴者にダウンロードを許可するか' },
+        requireSignIn: { type: 'boolean', description: '視聴にZoomログインを必須にするか' },
+      },
+      required: ['meetingId'],
     },
   },
   {
@@ -582,6 +718,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         out += `\n結果: 成功 ${ok}件、失敗 ${ng}件`;
         return { content: [{ type: 'text', text: out }] };
+      }
+
+      case 'get-share-link': {
+        const s = await getShareInfo(String(args?.meetingId));
+        const sizeMb = Math.round(s.totalSize / 1024 / 1024);
+        const paste =
+          `${s.topic}（${displayDateTime(s.startTime, '')}・${s.duration}分）の録画です。\n` +
+          `${s.shareUrl}` +
+          (s.passcode ? `\nパスコード: ${s.passcode}` : '');
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `共有リンク\n${s.shareUrl}\n\n` +
+                (s.passcode
+                  ? `視聴パスコード: ${s.passcode}\n※パスコードが必要です。無しで配りたい場合は set-share-settings で removePasscode を使ってください。\n\n`
+                  : `視聴パスコード: なし（リンクだけで見られます）\n\n`) +
+                `録画時間: ${s.duration}分 / 容量: ${sizeMb}MB\n\n` +
+                `--- そのまま貼れる文面 ---\n${paste}`,
+            },
+          ],
+        };
+      }
+
+      case 'set-share-settings': {
+        await updateShareSettings(String(args?.meetingId), {
+          share: args?.share,
+          removePasscode: args?.removePasscode,
+          allowDownload: args?.allowDownload,
+          requireSignIn: args?.requireSignIn,
+        });
+        const changed = [
+          args?.share ? `公開範囲→${args.share}` : null,
+          args?.removePasscode ? 'パスコード解除' : null,
+          args?.allowDownload !== undefined
+            ? `DL許可→${args.allowDownload ? 'する' : 'しない'}`
+            : null,
+          args?.requireSignIn !== undefined
+            ? `ログイン必須→${args.requireSignIn ? 'する' : 'しない'}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' / ');
+        return {
+          content: [
+            { type: 'text', text: `共有設定を更新しました（${changed || '変更なし'}）` },
+          ],
+        };
       }
 
       case 'delete-recording': {
