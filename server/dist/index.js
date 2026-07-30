@@ -32653,7 +32653,9 @@ var ZOOM_CLIENT_ID = requireEnv("ZOOM_CLIENT_ID");
 var ZOOM_CLIENT_SECRET = requireEnv("ZOOM_CLIENT_SECRET");
 var ZOOM_USER_EMAIL = requireEnv("ZOOM_USER_EMAIL");
 var DOWNLOAD_DIR = process.env.ZOOM_DOWNLOAD_DIR || path.join(os.homedir(), "Downloads", "zoom-recordings");
+var VIMEO_ACCESS_TOKEN = process.env.VIMEO_ACCESS_TOKEN || "";
 var API = "https://api.zoom.us/v2";
+var VIMEO_API = "https://api.vimeo.com";
 async function getTokenInfo() {
   const credentials = Buffer.from(
     `${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}`
@@ -32917,6 +32919,120 @@ async function updateShareSettings(idOrUuid, patch) {
     rethrow(e, "\u5171\u6709\u8A2D\u5B9A\u306E\u66F4\u65B0\u30A8\u30E9\u30FC");
   }
 }
+function requireVimeoToken() {
+  if (!VIMEO_ACCESS_TOKEN) {
+    throw new Error(
+      "VIMEO_ACCESS_TOKEN \u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\ndeveloper.vimeo.com/apps \u3067\u30A2\u30D7\u30EA\u3092\u4F5C\u308A\u3001upload / edit / private / video_files \u306E\n\u30B9\u30B3\u30FC\u30D7\u3092\u4ED8\u3051\u305F\u30C8\u30FC\u30AF\u30F3\u3092\u767A\u884C\u3057\u3066\u3001server/.env.local \u306B\u8FFD\u8A18\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+    );
+  }
+  return VIMEO_ACCESS_TOKEN;
+}
+var VIMEO_HEADERS = (token) => ({
+  Authorization: `Bearer ${token}`,
+  Accept: "application/vnd.vimeo.*+json;version=3.4"
+});
+function hasLocalTranscript(topic, startTime) {
+  if (!fs.existsSync(DOWNLOAD_DIR)) return false;
+  const date3 = new Date(startTime);
+  const p = (n) => String(n).padStart(2, "0");
+  const ymd = `${date3.getFullYear()}-${p(date3.getMonth() + 1)}-${p(date3.getDate())}`;
+  const strip = (s) => s.replace(/\s+/g, "");
+  const key = strip(sanitizeFileName(topic)).slice(0, 8);
+  if (!key) return false;
+  return fs.readdirSync(DOWNLOAD_DIR).some((f) => f.endsWith(".vtt") && f.includes(ymd) && strip(f).includes(key));
+}
+async function uploadToVimeo(params) {
+  const vt = requireVimeoToken();
+  const zt = await getAccessToken();
+  const recordings = await listRecordings(500, 12);
+  const rec = recordings.find(
+    (r) => String(r.id) === params.idOrUuid || r.uuid === params.idOrUuid
+  );
+  if (!rec) {
+    throw new Error(
+      `${params.idOrUuid} \u306B\u8A72\u5F53\u3059\u308B\u9332\u753B\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002list-recordings \u3067 ID \u307E\u305F\u306F uuid \u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+    );
+  }
+  const mp4s = rec.recording_files.filter((f) => f.file_type === "MP4" && f.file_size > 0).sort((a, b) => b.file_size - a.file_size);
+  if (!mp4s.length) {
+    throw new Error(
+      `\u300C${rec.topic}\u300D\u306B\u30A2\u30C3\u30D7\u30ED\u30FC\u30C9\u3067\u304D\u308BMP4\u304C\u3042\u308A\u307E\u305B\u3093\u3002\u307E\u3060Zoom\u5074\u3067\u5909\u63DB\u4E2D\u306E\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002`
+    );
+  }
+  const mp4 = mp4s[0];
+  const view = params.privacyView ?? "unlisted";
+  const body = {
+    name: params.name ?? `${rec.topic}\uFF08${rec.start_time.slice(0, 10)}\uFF09`,
+    description: params.description ?? `Zoom\u9332\u753B\u3088\u308A\u3002${rec.duration}\u5206\u3002${displayDateTime(rec.start_time, "")}`,
+    // access_token をクエリに付けた署名付きURLをVimeoが取得する
+    upload: { approach: "pull", link: `${mp4.download_url}?access_token=${zt}` },
+    privacy: {
+      view,
+      // 埋め込みは既定で public。whitelist にすると未登録ドメインで再生できなくなる
+      embed: params.embed ?? "public",
+      download: params.allowDownload ?? false,
+      add: false
+    }
+  };
+  if (view === "password") {
+    if (!params.password) {
+      throw new Error("privacyView \u306B password \u3092\u6307\u5B9A\u3057\u305F\u5834\u5408\u306F password \u3082\u5FC5\u8981\u3067\u3059\u3002");
+    }
+    body.privacy.password = params.password;
+    body.password = params.password;
+  }
+  try {
+    const res = await axios_default.post(`${VIMEO_API}/me/videos`, body, {
+      headers: { ...VIMEO_HEADERS(vt), "Content-Type": "application/json" }
+    });
+    const d = res.data;
+    return {
+      topic: rec.topic,
+      sizeMb: Math.round(mp4.file_size / 1024 / 1024),
+      uri: d.uri,
+      link: d.link,
+      status: d.upload?.status,
+      view: d.privacy?.view
+    };
+  } catch (e) {
+    if (axios_default.isAxiosError(e)) {
+      const dm = e.response?.data?.developer_message;
+      throw new Error(
+        `Vimeo\u3078\u306E\u53D6\u308A\u8FBC\u307F\u958B\u59CB\u306B\u5931\u6557\u3057\u307E\u3057\u305F: ${e.response?.status ?? ""} ${dm || e.message}`
+      );
+    }
+    throw e;
+  }
+}
+async function vimeoStatus(uriOrId) {
+  const vt = requireVimeoToken();
+  const uri = uriOrId.startsWith("/videos/") ? uriOrId : `/videos/${uriOrId.replace(/^.*\/(\d+).*$/, "$1")}`;
+  try {
+    const res = await axios_default.get(`${VIMEO_API}${uri}`, {
+      headers: VIMEO_HEADERS(vt),
+      params: {
+        fields: "name,link,duration,status,upload.status,transcode.status,privacy"
+      }
+    });
+    const d = res.data;
+    return {
+      name: d.name,
+      link: d.link,
+      duration: d.duration,
+      status: d.status,
+      upload: d.upload?.status,
+      transcode: d.transcode?.status,
+      view: d.privacy?.view,
+      embed: d.privacy?.embed
+    };
+  } catch (e) {
+    if (axios_default.isAxiosError(e)) {
+      const dm = e.response?.data?.developer_message;
+      throw new Error(`Vimeo\u306E\u72B6\u614B\u53D6\u5F97\u306B\u5931\u6557\u3057\u307E\u3057\u305F: ${dm || e.message}`);
+    }
+    throw e;
+  }
+}
 async function deleteRecording(meetingUuid) {
   const token = await getAccessToken();
   const encoded = encodeURIComponent(encodeURIComponent(meetingUuid));
@@ -33161,11 +33277,61 @@ var tools = [
     }
   },
   {
-    name: "delete-recording",
-    description: "\u9332\u753B\u3092\u30B4\u30DF\u7BB1\u3078\u79FB\u3059\uFF0830\u65E5\u4EE5\u5185\u306F\u5FA9\u5143\u53EF\u80FD\uFF09\u3002\u8B70\u4E8B\u9332\u5316\u304C\u7D42\u308F\u3063\u305F\u3082\u306E\u306E\u6574\u7406\u306B\u4F7F\u3046\u3002\u8981\u30B9\u30B3\u30FC\u30D7: recording:write",
+    name: "upload-to-vimeo",
+    description: "Zoom\u306E\u9332\u753B\u3092Vimeo\u3078\u9000\u907F\u3059\u308B\uFF08Vimeo\u304C\u76F4\u63A5Zoom\u304B\u3089\u53D6\u5F97\u3059\u308B\u305F\u3081\u624B\u5143\u306E\u56DE\u7DDA\u3092\u4F7F\u308F\u306A\u3044\uFF09\u3002\u65E2\u5B9A\u306FURL\u9650\u5B9A\u516C\u958B\u30FBDL\u7981\u6B62\u30FB\u57CB\u3081\u8FBC\u307F\u53EF\u3002Zoom\u306E\u5BB9\u91CF\u3092\u7A7A\u3051\u308B\u524D\u6BB5\u3068\u3057\u3066\u4F7F\u3046\u3002\u8981: VIMEO_ACCESS_TOKEN",
     inputSchema: {
       type: "object",
-      properties: { meetingUuid: { type: "string", description: "list-recordings \u304C\u8FD4\u3059 uuid" } },
+      properties: {
+        meetingId: { type: "string", description: "\u30DF\u30FC\u30C6\u30A3\u30F3\u30B0ID \u307E\u305F\u306F list-recordings \u304C\u8FD4\u3059 uuid" },
+        name: { type: "string", description: "Vimeo\u4E0A\u306E\u30BF\u30A4\u30C8\u30EB\u3002\u7701\u7565\u6642\u306F\u300C\u30C8\u30D4\u30C3\u30AF\uFF08\u65E5\u4ED8\uFF09\u300D" },
+        description: { type: "string" },
+        privacyView: {
+          type: "string",
+          enum: ["unlisted", "password", "nobody"],
+          description: "unlisted=URL\u3092\u77E5\u3063\u3066\u3044\u308B\u4EBA\u3060\u3051\uFF08\u65E2\u5B9A\uFF09 / password=\u30D1\u30B9\u30EF\u30FC\u30C9\u5FC5\u9808 / nobody=\u81EA\u5206\u3060\u3051",
+          default: "unlisted"
+        },
+        password: { type: "string", description: "privacyView=password \u306E\u3068\u304D\u306B\u5FC5\u9808" },
+        allowDownload: { type: "boolean", description: "\u8996\u8074\u8005\u306E\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9\u3092\u8A31\u53EF\u3059\u308B\u304B", default: false },
+        embed: {
+          type: "string",
+          enum: ["public", "private", "whitelist"],
+          description: "public=\u3069\u3053\u306B\u3067\u3082\u57CB\u3081\u8FBC\u3081\u308B\uFF08\u65E2\u5B9A\uFF09\u3002whitelist\u306F\u767B\u9332\u3057\u5FD8\u308C\u305F\u30C9\u30E1\u30A4\u30F3\u3067\u518D\u751F\u3067\u304D\u306A\u304F\u306A\u308B\u306E\u3067\u6CE8\u610F",
+          default: "public"
+        }
+      },
+      required: ["meetingId"]
+    }
+  },
+  {
+    name: "vimeo-status",
+    description: "Vimeo\u306E\u53D6\u308A\u8FBC\u307F\u30FB\u5909\u63DB\u306E\u9032\u884C\u72B6\u6CC1\u3092\u78BA\u8A8D\u3059\u308B\u3002upload-to-vimeo \u306E\u76F4\u5F8C\u306F\u307E\u3060\u8996\u8074\u3067\u304D\u306A\u3044\u305F\u3081\u3001\u3053\u308C\u3067\u5B8C\u4E86\u3092\u5F85\u3064\u3002",
+    inputSchema: {
+      type: "object",
+      properties: {
+        video: { type: "string", description: "Vimeo\u306EURL\u3001\u52D5\u753BID\u3001\u307E\u305F\u306F /videos/123 \u5F62\u5F0F\u306EURI" }
+      },
+      required: ["video"]
+    }
+  },
+  {
+    name: "delete-recording",
+    description: "\u9332\u753B\u3092\u30B4\u30DF\u7BB1\u3078\u79FB\u3059\uFF0830\u65E5\u4EE5\u5185\u306F\u5FA9\u5143\u53EF\u80FD\uFF09\u3002**\u6587\u5B57\u8D77\u3053\u3057\u304C\u624B\u5143\u306B\u7121\u3044\u5834\u5408\u306F\u4E2D\u6B62\u3059\u308B\u5B89\u5168\u88C5\u7F6E\u3064\u304D**\u3002\u5B9F\u884C\u306B\u306F confirm: true \u304C\u5FC5\u8981\u3002\u8981\u30B9\u30B3\u30FC\u30D7: recording:write",
+    inputSchema: {
+      type: "object",
+      properties: {
+        meetingUuid: { type: "string", description: "list-recordings \u304C\u8FD4\u3059 uuid" },
+        confirm: {
+          type: "boolean",
+          description: "\u672C\u4EBA\u306B\u78BA\u8A8D\u3092\u53D6\u3063\u3066\u304B\u3089 true \u306B\u3059\u308B\u3002false \u3084\u672A\u6307\u5B9A\u306A\u3089\u4F55\u3082\u3057\u306A\u3044",
+          default: false
+        },
+        skipTranscriptCheck: {
+          type: "boolean",
+          description: "\u6587\u5B57\u8D77\u3053\u3057\u304C\u624B\u5143\u306B\u7121\u304F\u3066\u3082\u6D88\u3059\u5834\u5408\u306E\u307F true\u3002\u65E2\u5B9A\u306F false\uFF08\u5B89\u5168\u5074\uFF09",
+          default: false
+        }
+      },
       required: ["meetingUuid"]
     }
   }
@@ -33353,8 +33519,87 @@ ${paste}`
           ]
         };
       }
+      case "upload-to-vimeo": {
+        const r = await uploadToVimeo({
+          idOrUuid: String(args?.meetingId),
+          name: args?.name,
+          description: args?.description,
+          privacyView: args?.privacyView,
+          password: args?.password,
+          allowDownload: args?.allowDownload,
+          embed: args?.embed
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Vimeo\u3078\u306E\u53D6\u308A\u8FBC\u307F\u3092\u958B\u59CB\u3057\u307E\u3057\u305F
+\u5BFE\u8C61: ${r.topic}\uFF08${r.sizeMb}MB\uFF09
+\u30EA\u30F3\u30AF: ${r.link}
+\u516C\u958B\u7BC4\u56F2: ${r.view}
+\u72B6\u614B: ${r.status}
+
+\u203BVimeo\u304CZoom\u304B\u3089\u76F4\u63A5\u53D6\u5F97\u3059\u308B\u305F\u3081\u3001\u624B\u5143\u306E\u56DE\u7DDA\u306F\u4F7F\u3044\u307E\u305B\u3093\u3002
+\u203B\u5909\u63DB\u304C\u7D42\u308F\u308B\u307E\u3067\u8996\u8074\u3067\u304D\u307E\u305B\u3093\u3002\`vimeo-status\` \u3067\u300C${r.uri}\u300D\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002
+\u3000\u76EE\u5B89\u306F500MB\u306710\u301C30\u5206\u3067\u3059\u3002`
+            }
+          ]
+        };
+      }
+      case "vimeo-status": {
+        const s = await vimeoStatus(String(args?.video));
+        const done = s.status === "available";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${s.name}
+\u72B6\u614B: ${s.status}\uFF08\u53D6\u308A\u8FBC\u307F: ${s.upload} / \u5909\u63DB: ${s.transcode}\uFF09
+\u5C3A: ${Math.floor((s.duration || 0) / 60)}\u5206
+\u516C\u958B\u7BC4\u56F2: ${s.view} / \u57CB\u3081\u8FBC\u307F: ${s.embed}
+\u30EA\u30F3\u30AF: ${s.link}
+
+` + (done ? "\u8996\u8074\u3067\u304D\u308B\u72B6\u614B\u3067\u3059\u3002\u3053\u306EURL\u3092\u305D\u306E\u307E\u307E\u6E21\u305B\u307E\u3059\u3002" : "\u307E\u3060\u51E6\u7406\u4E2D\u3067\u3059\u3002\u3057\u3070\u3089\u304F\u5F85\u3063\u3066\u304B\u3089\u518D\u5EA6\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002")
+            }
+          ]
+        };
+      }
       case "delete-recording": {
-        await deleteRecording(String(args?.meetingUuid));
+        const uuid2 = String(args?.meetingUuid);
+        if (args?.confirm !== true) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "\u524A\u9664\u306F\u5B9F\u884C\u3057\u3066\u3044\u307E\u305B\u3093\u3002\n\u672C\u4EBA\u306B\u300C\u3053\u306E\u9332\u753B\u3092\u6D88\u3057\u3066\u3088\u3044\u304B\u300D\u3092\u78BA\u8A8D\u3057\u3001\u4E86\u627F\u3092\u5F97\u3066\u304B\u3089 confirm: true \u3067\u518D\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+              }
+            ]
+          };
+        }
+        if (args?.skipTranscriptCheck !== true) {
+          const recordings = await listRecordings(500, 12);
+          const rec = recordings.find((r) => r.uuid === uuid2 || String(r.id) === uuid2);
+          if (rec && !hasLocalTranscript(rec.topic, rec.start_time)) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `\u524A\u9664\u3092\u4E2D\u6B62\u3057\u307E\u3057\u305F\u3002
+
+\u300C${rec.topic}\u300D\u306E\u6587\u5B57\u8D77\u3053\u3057\u304C\u624B\u5143\u306B\u3042\u308A\u307E\u305B\u3093\u3002
+**Zoom\u306E\u9332\u753B\u3092\u6D88\u3059\u3068\u6587\u5B57\u8D77\u3053\u3057\u3082\u4E00\u7DD2\u306B\u6D88\u3048\u307E\u3059\u3002** \u8B70\u4E8B\u9332\u3092\u4F5C\u308C\u306A\u304F\u306A\u308A\u307E\u3059\u3002
+
+\u5148\u306B download-recordings \u3092 transcriptOnly: true \u3067\u5B9F\u884C\u3057\u3066\u3001
+\u8B70\u4E8B\u9332\u307E\u3067\u4F5C\u3063\u3066\u304B\u3089\u524A\u9664\u3057\u3066\u304F\u3060\u3055\u3044\u3002
+
+\u6587\u5B57\u8D77\u3053\u3057\u304C\u4E0D\u8981\u3060\u3068\u5224\u65AD\u6E08\u307F\u306A\u3089 skipTranscriptCheck: true \u3092\u4ED8\u3051\u3066\u518D\u5B9F\u884C\u3067\u304D\u307E\u3059\u3002`
+                }
+              ],
+              isError: true
+            };
+          }
+        }
+        await deleteRecording(uuid2);
         return {
           content: [
             { type: "text", text: "\u9332\u753B\u3092\u30B4\u30DF\u7BB1\u3078\u79FB\u3057\u307E\u3057\u305F\uFF0830\u65E5\u4EE5\u5185\u306FZoom\u306E\u753B\u9762\u304B\u3089\u5FA9\u5143\u3067\u304D\u307E\u3059\uFF09\u3002" }

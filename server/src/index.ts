@@ -46,7 +46,11 @@ const DOWNLOAD_DIR =
   process.env.ZOOM_DOWNLOAD_DIR ||
   path.join(os.homedir(), 'Downloads', 'zoom-recordings');
 
+/** Vimeoへの退避を使う場合のみ設定。未設定でも他の機能は動く */
+const VIMEO_ACCESS_TOKEN = process.env.VIMEO_ACCESS_TOKEN || '';
+
 const API = 'https://api.zoom.us/v2';
+const VIMEO_API = 'https://api.vimeo.com';
 
 // ─────────────────────────────────────────────
 // 共通
@@ -432,6 +436,168 @@ async function updateShareSettings(
   }
 }
 
+// ─────────────────────────────────────────────
+// Vimeoへの退避
+// ─────────────────────────────────────────────
+
+function requireVimeoToken(): string {
+  if (!VIMEO_ACCESS_TOKEN) {
+    throw new Error(
+      'VIMEO_ACCESS_TOKEN が未設定です。\n' +
+        'developer.vimeo.com/apps でアプリを作り、upload / edit / private / video_files の\n' +
+        'スコープを付けたトークンを発行して、server/.env.local に追記してください。'
+    );
+  }
+  return VIMEO_ACCESS_TOKEN;
+}
+
+const VIMEO_HEADERS = (token: string) => ({
+  Authorization: `Bearer ${token}`,
+  Accept: 'application/vnd.vimeo.*+json;version=3.4',
+});
+
+/**
+ * その録画の文字起こしが手元に落ちているか。削除の安全装置に使う。
+ *
+ * 判定は「日付が一致」かつ「トピック名の頭が一致」。
+ * 空白の有無で取りこぼさないよう、両方から空白を除いて比べる。
+ * 迷ったら「無い」と判定する（消してしまう方向に倒さない）。
+ */
+function hasLocalTranscript(topic: string, startTime: string): boolean {
+  if (!fs.existsSync(DOWNLOAD_DIR)) return false;
+  const date = new Date(startTime);
+  const p = (n: number) => String(n).padStart(2, '0');
+  const ymd = `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  const strip = (s: string) => s.replace(/\s+/g, '');
+  const key = strip(sanitizeFileName(topic)).slice(0, 8);
+  if (!key) return false;
+  return fs
+    .readdirSync(DOWNLOAD_DIR)
+    .some((f) => f.endsWith('.vtt') && f.includes(ymd) && strip(f).includes(key));
+}
+
+interface VimeoUploadParams {
+  idOrUuid: string;
+  name?: string;
+  description?: string;
+  privacyView?: 'unlisted' | 'password' | 'nobody';
+  password?: string;
+  allowDownload?: boolean;
+  embed?: 'public' | 'private' | 'whitelist';
+}
+
+/**
+ * ZoomのMP4をVimeoへ退避する。
+ *
+ * Vimeoの「pull」方式を使い、Zoomの署名付きURLをVimeoに渡して
+ * Vimeo側が直接取得する。手元に1GB級のファイルを落とさずに済む。
+ */
+async function uploadToVimeo(params: VimeoUploadParams) {
+  const vt = requireVimeoToken();
+  const zt = await getAccessToken();
+
+  // 対象の録画を特定する（単一取得は権限が多く要るので一覧から探す）
+  const recordings = await listRecordings(500, 12);
+  const rec = recordings.find(
+    (r) => String(r.id) === params.idOrUuid || r.uuid === params.idOrUuid
+  );
+  if (!rec) {
+    throw new Error(
+      `${params.idOrUuid} に該当する録画が見つかりません。list-recordings で ID または uuid を確認してください。`
+    );
+  }
+
+  const mp4s = rec.recording_files
+    .filter((f) => f.file_type === 'MP4' && f.file_size > 0)
+    .sort((a, b) => b.file_size - a.file_size);
+  if (!mp4s.length) {
+    throw new Error(
+      `「${rec.topic}」にアップロードできるMP4がありません。まだZoom側で変換中の可能性があります。`
+    );
+  }
+  const mp4 = mp4s[0];
+
+  const view = params.privacyView ?? 'unlisted';
+  const body: Record<string, unknown> = {
+    name: params.name ?? `${rec.topic}（${rec.start_time.slice(0, 10)}）`,
+    description:
+      params.description ??
+      `Zoom録画より。${rec.duration}分。${displayDateTime(rec.start_time, '')}`,
+    // access_token をクエリに付けた署名付きURLをVimeoが取得する
+    upload: { approach: 'pull', link: `${mp4.download_url}?access_token=${zt}` },
+    privacy: {
+      view,
+      // 埋め込みは既定で public。whitelist にすると未登録ドメインで再生できなくなる
+      embed: params.embed ?? 'public',
+      download: params.allowDownload ?? false,
+      add: false,
+    },
+  };
+  if (view === 'password') {
+    if (!params.password) {
+      throw new Error('privacyView に password を指定した場合は password も必要です。');
+    }
+    (body.privacy as Record<string, unknown>).password = params.password;
+    body.password = params.password;
+  }
+
+  try {
+    const res = await axios.post(`${VIMEO_API}/me/videos`, body, {
+      headers: { ...VIMEO_HEADERS(vt), 'Content-Type': 'application/json' },
+    });
+    const d = res.data;
+    return {
+      topic: rec.topic,
+      sizeMb: Math.round(mp4.file_size / 1024 / 1024),
+      uri: d.uri as string,
+      link: d.link as string,
+      status: d.upload?.status as string,
+      view: d.privacy?.view as string,
+    };
+  } catch (e) {
+    if (axios.isAxiosError(e)) {
+      const dm = (e.response?.data as any)?.developer_message;
+      throw new Error(
+        `Vimeoへの取り込み開始に失敗しました: ${e.response?.status ?? ''} ${dm || e.message}`
+      );
+    }
+    throw e;
+  }
+}
+
+/** Vimeo側の取り込み・変換の進行状況 */
+async function vimeoStatus(uriOrId: string) {
+  const vt = requireVimeoToken();
+  const uri = uriOrId.startsWith('/videos/')
+    ? uriOrId
+    : `/videos/${uriOrId.replace(/^.*\/(\d+).*$/, '$1')}`;
+  try {
+    const res = await axios.get(`${VIMEO_API}${uri}`, {
+      headers: VIMEO_HEADERS(vt),
+      params: {
+        fields: 'name,link,duration,status,upload.status,transcode.status,privacy',
+      },
+    });
+    const d = res.data;
+    return {
+      name: d.name as string,
+      link: d.link as string,
+      duration: d.duration as number,
+      status: d.status as string,
+      upload: d.upload?.status as string,
+      transcode: d.transcode?.status as string,
+      view: d.privacy?.view as string,
+      embed: d.privacy?.embed as string,
+    };
+  } catch (e) {
+    if (axios.isAxiosError(e)) {
+      const dm = (e.response?.data as any)?.developer_message;
+      throw new Error(`Vimeoの状態取得に失敗しました: ${dm || e.message}`);
+    }
+    throw e;
+  }
+}
+
 /** 録画の削除。ゴミ箱に入るので30日以内なら復元可能。recording:write が必要 */
 async function deleteRecording(meetingUuid: string) {
   const token = await getAccessToken();
@@ -709,12 +875,65 @@ const tools = [
     },
   },
   {
-    name: 'delete-recording',
+    name: 'upload-to-vimeo',
     description:
-      '録画をゴミ箱へ移す（30日以内は復元可能）。議事録化が終わったものの整理に使う。要スコープ: recording:write',
+      'Zoomの録画をVimeoへ退避する（Vimeoが直接Zoomから取得するため手元の回線を使わない）。既定はURL限定公開・DL禁止・埋め込み可。Zoomの容量を空ける前段として使う。要: VIMEO_ACCESS_TOKEN',
     inputSchema: {
       type: 'object',
-      properties: { meetingUuid: { type: 'string', description: 'list-recordings が返す uuid' } },
+      properties: {
+        meetingId: { type: 'string', description: 'ミーティングID または list-recordings が返す uuid' },
+        name: { type: 'string', description: 'Vimeo上のタイトル。省略時は「トピック（日付）」' },
+        description: { type: 'string' },
+        privacyView: {
+          type: 'string',
+          enum: ['unlisted', 'password', 'nobody'],
+          description: 'unlisted=URLを知っている人だけ（既定） / password=パスワード必須 / nobody=自分だけ',
+          default: 'unlisted',
+        },
+        password: { type: 'string', description: 'privacyView=password のときに必須' },
+        allowDownload: { type: 'boolean', description: '視聴者のダウンロードを許可するか', default: false },
+        embed: {
+          type: 'string',
+          enum: ['public', 'private', 'whitelist'],
+          description:
+            'public=どこにでも埋め込める（既定）。whitelistは登録し忘れたドメインで再生できなくなるので注意',
+          default: 'public',
+        },
+      },
+      required: ['meetingId'],
+    },
+  },
+  {
+    name: 'vimeo-status',
+    description:
+      'Vimeoの取り込み・変換の進行状況を確認する。upload-to-vimeo の直後はまだ視聴できないため、これで完了を待つ。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        video: { type: 'string', description: 'VimeoのURL、動画ID、または /videos/123 形式のURI' },
+      },
+      required: ['video'],
+    },
+  },
+  {
+    name: 'delete-recording',
+    description:
+      '録画をゴミ箱へ移す（30日以内は復元可能）。**文字起こしが手元に無い場合は中止する安全装置つき**。実行には confirm: true が必要。要スコープ: recording:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        meetingUuid: { type: 'string', description: 'list-recordings が返す uuid' },
+        confirm: {
+          type: 'boolean',
+          description: '本人に確認を取ってから true にする。false や未指定なら何もしない',
+          default: false,
+        },
+        skipTranscriptCheck: {
+          type: 'boolean',
+          description: '文字起こしが手元に無くても消す場合のみ true。既定は false（安全側）',
+          default: false,
+        },
+      },
       required: ['meetingUuid'],
     },
   },
@@ -924,8 +1143,97 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'upload-to-vimeo': {
+        const r = await uploadToVimeo({
+          idOrUuid: String(args?.meetingId),
+          name: args?.name,
+          description: args?.description,
+          privacyView: args?.privacyView,
+          password: args?.password,
+          allowDownload: args?.allowDownload,
+          embed: args?.embed,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `Vimeoへの取り込みを開始しました\n` +
+                `対象: ${r.topic}（${r.sizeMb}MB）\n` +
+                `リンク: ${r.link}\n` +
+                `公開範囲: ${r.view}\n` +
+                `状態: ${r.status}\n\n` +
+                `※VimeoがZoomから直接取得するため、手元の回線は使いません。\n` +
+                `※変換が終わるまで視聴できません。\`vimeo-status\` で「${r.uri}」を確認してください。\n` +
+                `　目安は500MBで10〜30分です。`,
+            },
+          ],
+        };
+      }
+
+      case 'vimeo-status': {
+        const s = await vimeoStatus(String(args?.video));
+        const done = s.status === 'available';
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `${s.name}\n` +
+                `状態: ${s.status}（取り込み: ${s.upload} / 変換: ${s.transcode}）\n` +
+                `尺: ${Math.floor((s.duration || 0) / 60)}分\n` +
+                `公開範囲: ${s.view} / 埋め込み: ${s.embed}\n` +
+                `リンク: ${s.link}\n\n` +
+                (done
+                  ? '視聴できる状態です。このURLをそのまま渡せます。'
+                  : 'まだ処理中です。しばらく待ってから再度確認してください。'),
+            },
+          ],
+        };
+      }
+
       case 'delete-recording': {
-        await deleteRecording(String(args?.meetingUuid));
+        const uuid = String(args?.meetingUuid);
+
+        // 安全装置1: 明示的な確認なしには消さない
+        if (args?.confirm !== true) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  '削除は実行していません。\n' +
+                  '本人に「この録画を消してよいか」を確認し、了承を得てから confirm: true で再実行してください。',
+              },
+            ],
+          };
+        }
+
+        // 安全装置2: 文字起こしが手元に無いなら止める
+        // （Zoomの録画を消すと文字起こしも一緒に消えるため、順番を守らせる）
+        if (args?.skipTranscriptCheck !== true) {
+          const recordings = await listRecordings(500, 12);
+          const rec = recordings.find((r) => r.uuid === uuid || String(r.id) === uuid);
+          if (rec && !hasLocalTranscript(rec.topic, rec.start_time)) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    `削除を中止しました。\n\n` +
+                    `「${rec.topic}」の文字起こしが手元にありません。\n` +
+                    `**Zoomの録画を消すと文字起こしも一緒に消えます。** 議事録を作れなくなります。\n\n` +
+                    `先に download-recordings を transcriptOnly: true で実行して、\n` +
+                    `議事録まで作ってから削除してください。\n\n` +
+                    `文字起こしが不要だと判断済みなら skipTranscriptCheck: true を付けて再実行できます。`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
+
+        await deleteRecording(uuid);
         return {
           content: [
             { type: 'text', text: '録画をゴミ箱へ移しました（30日以内はZoomの画面から復元できます）。' },
