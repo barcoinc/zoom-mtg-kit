@@ -598,6 +598,30 @@ async function vimeoStatus(uriOrId: string) {
   }
 }
 
+/** Vimeoのプランと残りストレージ */
+async function vimeoQuota() {
+  const vt = requireVimeoToken();
+  try {
+    const res = await axios.get(`${VIMEO_API}/me`, {
+      headers: VIMEO_HEADERS(vt),
+      params: { fields: 'name,account,upload_quota' },
+    });
+    const q = res.data.upload_quota || {};
+    return {
+      name: res.data.name as string,
+      plan: res.data.account as string,
+      space: q.space as { free?: number; max?: number; used?: number } | undefined,
+      periodic: q.periodic as { free?: number; max?: number; used?: number } | undefined,
+    };
+  } catch (e) {
+    if (axios.isAxiosError(e)) {
+      const dm = (e.response?.data as any)?.developer_message;
+      throw new Error(`Vimeoの容量取得に失敗しました: ${dm || e.message}`);
+    }
+    throw e;
+  }
+}
+
 /** 録画の削除。ゴミ箱に入るので30日以内なら復元可能。recording:write が必要 */
 async function deleteRecording(meetingUuid: string) {
   const token = await getAccessToken();
@@ -916,6 +940,11 @@ const tools = [
     },
   },
   {
+    name: 'vimeo-quota',
+    description: 'Vimeoのプランと残りストレージを確認する。退避を続けられるか判断するのに使う。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'delete-recording',
     description:
       '録画をゴミ箱へ移す（30日以内は復元可能）。**文字起こしが手元に無い場合は中止する安全装置つき**。実行には confirm: true が必要。要スコープ: recording:write',
@@ -1190,6 +1219,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case 'vimeo-quota': {
+        const q = await vimeoQuota();
+        const gb = (x?: number) =>
+          typeof x === 'number' ? `${(x / 1024 / 1024 / 1024).toFixed(2)} GB` : '—';
+        const lines = [`${q.name}（プラン: ${q.plan}）`];
+        if (q.space) {
+          lines.push(
+            `ストレージ: 空き ${gb(q.space.free)} / 上限 ${gb(q.space.max)} / 使用 ${gb(q.space.used)}`
+          );
+        }
+        if (q.periodic?.max) {
+          lines.push(
+            `期間あたり: 空き ${gb(q.periodic.free)} / 上限 ${gb(q.periodic.max)}`
+          );
+        }
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
 
       case 'delete-recording': {

@@ -33033,6 +33033,28 @@ async function vimeoStatus(uriOrId) {
     throw e;
   }
 }
+async function vimeoQuota() {
+  const vt = requireVimeoToken();
+  try {
+    const res = await axios_default.get(`${VIMEO_API}/me`, {
+      headers: VIMEO_HEADERS(vt),
+      params: { fields: "name,account,upload_quota" }
+    });
+    const q = res.data.upload_quota || {};
+    return {
+      name: res.data.name,
+      plan: res.data.account,
+      space: q.space,
+      periodic: q.periodic
+    };
+  } catch (e) {
+    if (axios_default.isAxiosError(e)) {
+      const dm = e.response?.data?.developer_message;
+      throw new Error(`Vimeo\u306E\u5BB9\u91CF\u53D6\u5F97\u306B\u5931\u6557\u3057\u307E\u3057\u305F: ${dm || e.message}`);
+    }
+    throw e;
+  }
+}
 async function deleteRecording(meetingUuid) {
   const token = await getAccessToken();
   const encoded = encodeURIComponent(encodeURIComponent(meetingUuid));
@@ -33315,6 +33337,11 @@ var tools = [
     }
   },
   {
+    name: "vimeo-quota",
+    description: "Vimeo\u306E\u30D7\u30E9\u30F3\u3068\u6B8B\u308A\u30B9\u30C8\u30EC\u30FC\u30B8\u3092\u78BA\u8A8D\u3059\u308B\u3002\u9000\u907F\u3092\u7D9A\u3051\u3089\u308C\u308B\u304B\u5224\u65AD\u3059\u308B\u306E\u306B\u4F7F\u3046\u3002",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
     name: "delete-recording",
     description: "\u9332\u753B\u3092\u30B4\u30DF\u7BB1\u3078\u79FB\u3059\uFF0830\u65E5\u4EE5\u5185\u306F\u5FA9\u5143\u53EF\u80FD\uFF09\u3002**\u6587\u5B57\u8D77\u3053\u3057\u304C\u624B\u5143\u306B\u7121\u3044\u5834\u5408\u306F\u4E2D\u6B62\u3059\u308B\u5B89\u5168\u88C5\u7F6E\u3064\u304D**\u3002\u5B9F\u884C\u306B\u306F confirm: true \u304C\u5FC5\u8981\u3002\u8981\u30B9\u30B3\u30FC\u30D7: recording:write",
     inputSchema: {
@@ -33563,6 +33590,22 @@ ${paste}`
             }
           ]
         };
+      }
+      case "vimeo-quota": {
+        const q = await vimeoQuota();
+        const gb = (x) => typeof x === "number" ? `${(x / 1024 / 1024 / 1024).toFixed(2)} GB` : "\u2014";
+        const lines = [`${q.name}\uFF08\u30D7\u30E9\u30F3: ${q.plan}\uFF09`];
+        if (q.space) {
+          lines.push(
+            `\u30B9\u30C8\u30EC\u30FC\u30B8: \u7A7A\u304D ${gb(q.space.free)} / \u4E0A\u9650 ${gb(q.space.max)} / \u4F7F\u7528 ${gb(q.space.used)}`
+          );
+        }
+        if (q.periodic?.max) {
+          lines.push(
+            `\u671F\u9593\u3042\u305F\u308A: \u7A7A\u304D ${gb(q.periodic.free)} / \u4E0A\u9650 ${gb(q.periodic.max)}`
+          );
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       }
       case "delete-recording": {
         const uuid2 = String(args?.meetingUuid);
