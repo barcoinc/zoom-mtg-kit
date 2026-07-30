@@ -6,7 +6,7 @@
  * Claude Code から直接扱えるようにする。
  *
  * 認証はServer-to-Server OAuth（アカウント単位）。
- * 認証情報は必ず利用者自身のZoomアカウントで発行すること。詳細は SETUP.md。
+ * 認証情報は必ず利用者自身のZoomアカウントで発行すること。詳細は 導入マニュアル.md。
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -30,7 +30,7 @@ function requireEnv(name: string): string {
   if (!value) {
     throw new Error(
       `環境変数 ${name} が未設定です。` +
-        `サーバーディレクトリ直下の .env.local に設定してください（SETUP.md 参照）。`
+        `サーバーディレクトリ直下の .env.local に設定してください（導入マニュアル.md 参照）。`
     );
   }
   return value;
@@ -85,7 +85,7 @@ function rethrow(error: unknown, context: string): never {
       throw new Error(
         `${context}: Zoomアプリのスコープが足りません。\n` +
           `${data.message}\n` +
-          `→ Zoom Marketplace の該当アプリで不足スコープを追加し、再アクティベートしてください（SETUP.md 参照）。`
+          `→ Zoom Marketplace の該当アプリで不足スコープを追加し、再アクティベートしてください（導入マニュアル.md 参照）。`
       );
     }
     throw new Error(

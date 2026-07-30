@@ -71,7 +71,7 @@ https://us06web.zoom.us/rec/share/SxpGhXP5my_...
 
 ```
 zoom-mtg-kit/
-├─ SETUP.md              セットアップ手順（まずこれ）
+├─ 導入マニュアル.md      セットアップ手順（まずこれ）
 ├─ CLAUDE.md             Claude Codeへの指示書（自動で読まれる）
 ├─ server/               MCPサーバー本体（ビルド済み・そのまま動きます）
 └─ workflow/
@@ -88,7 +88,7 @@ zoom-mtg-kit/
 
 ## 始め方
 
-**[SETUP.md](SETUP.md) を上から順に。** 15〜20分で終わります。
+**[導入マニュアル.md](導入マニュアル.md) を上から順に。** 20分で終わります。
 
 とくに **手順1（Zoomの「音声文字起こしを作成」をON）は飛ばさないでください。** ここがOFFだと文字起こしが作られず、議事録が作れません。
 
