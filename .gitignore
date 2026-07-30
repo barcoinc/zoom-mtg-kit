@@ -4,7 +4,6 @@
 
 # ビルド成果物と依存
 server/node_modules/
-server/dist/
 
 # 議事録・文字起こし（機微情報を含むため絶対に上げない）
 clients/*/meetings/
@@ -13,3 +12,6 @@ clients/*/meetings/
 # OS
 .DS_Store
 Thumbs.db
+
+# 販売者向けの内部資料（配布しない）
+ONBOARDING.md

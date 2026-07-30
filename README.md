@@ -73,7 +73,7 @@ https://us06web.zoom.us/rec/share/SxpGhXP5my_...
 zoom-mtg-kit/
 ├─ SETUP.md              セットアップ手順（まずこれ）
 ├─ CLAUDE.md             Claude Codeへの指示書（自動で読まれる）
-├─ server/               MCPサーバー本体（TypeScript）
+├─ server/               MCPサーバー本体（ビルド済み・そのまま動きます）
 └─ workflow/
    ├─ 運用ルール.md        フォルダ構成・命名・議事録化の手順
    ├─ 議事録テンプレート.md  議事録の型
@@ -84,7 +84,7 @@ zoom-mtg-kit/
 
 - **Zoomの有料プラン（Pro以上）** — クラウド録画は無料プランでは使えません
 - Zoomアカウントの管理者権限（アプリを作るため）
-- Claude Code / Node.js 18以上
+- Claude Code / Node.js 18以上（**ビルド済みなので `npm install` は不要です**）
 
 ## 始め方
 
