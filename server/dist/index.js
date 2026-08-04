@@ -32886,8 +32886,8 @@ async function getShareInfo(idOrUuid) {
     );
     return toShareInfo(res.data);
   } catch (e) {
-    const isScopeError = axios_default.isAxiosError(e) && e.response?.data?.code === 4711;
-    if (!isScopeError) rethrow(e, "\u5171\u6709\u30EA\u30F3\u30AF\u306E\u53D6\u5F97\u30A8\u30E9\u30FC");
+    const isScopeError2 = axios_default.isAxiosError(e) && e.response?.data?.code === 4711;
+    if (!isScopeError2) rethrow(e, "\u5171\u6709\u30EA\u30F3\u30AF\u306E\u53D6\u5F97\u30A8\u30E9\u30FC");
   }
   const recordings = await listRecordings(500, 12);
   const hit = recordings.find(
@@ -33055,9 +33055,12 @@ async function vimeoQuota() {
     throw e;
   }
 }
+function isScopeError(e) {
+  return axios_default.isAxiosError(e) && e.response?.data?.code === 4711;
+}
 async function deleteRecording(meetingUuid) {
   const token = await getAccessToken();
-  const encoded = encodeURIComponent(encodeURIComponent(meetingUuid));
+  const encoded = meetingPathId(meetingUuid);
   try {
     await axios_default.delete(`${API}/meetings/${encoded}/recordings`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -33065,8 +33068,36 @@ async function deleteRecording(meetingUuid) {
     });
     return true;
   } catch (e) {
-    rethrow(e, "\u9332\u753B\u524A\u9664\u30A8\u30E9\u30FC");
+    if (!isScopeError(e)) rethrow(e, "\u9332\u753B\u524A\u9664\u30A8\u30E9\u30FC");
   }
+  const rec = (await listRecordings(500, 6)).find((r) => r.uuid === meetingUuid);
+  if (!rec) {
+    throw new Error(
+      "\u9332\u753B\u524A\u9664\u30A8\u30E9\u30FC: \u307E\u308B\u3054\u3068\u524A\u9664\u306E\u6A29\u9650\u304C\u7121\u304F\u3001\u4EE3\u308F\u308A\u306B\u4F7F\u3046\u9332\u753B\u4E00\u89A7\u306B\u3082\u8A72\u5F53\u306E\u9332\u753B\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\uFF08\u76F4\u8FD16\u30F6\u6708\u5916\u306E\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\uFF09\u3002"
+    );
+  }
+  const files = rec.recording_files || [];
+  const failed = [];
+  for (const f of files) {
+    if (!f.id) {
+      failed.push(`${f.file_type}(ID\u7121\u3057)`);
+      continue;
+    }
+    try {
+      await axios_default.delete(`${API}/meetings/${encoded}/recordings/${f.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { action: "trash" }
+      });
+    } catch (e) {
+      if (axios_default.isAxiosError(e) && e.response?.status === 404) continue;
+      if (isScopeError(e)) rethrow(e, "\u9332\u753B\u524A\u9664\u30A8\u30E9\u30FC");
+      failed.push(`${f.file_type}(${axios_default.isAxiosError(e) ? e.response?.status : e})`);
+    }
+  }
+  if (failed.length) {
+    throw new Error(`\u9332\u753B\u524A\u9664\u30A8\u30E9\u30FC: \u4E00\u90E8\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u524A\u9664\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F \u2192 ${failed.join(" / ")}`);
+  }
+  return true;
 }
 var FEATURE_SCOPES = [
   { feature: "\u30DF\u30FC\u30C6\u30A3\u30F3\u30B0\u3092\u4F5C\u308B", tools: "create-meeting", scopes: ["meeting:write:meeting"] },
@@ -33076,7 +33107,9 @@ var FEATURE_SCOPES = [
   { feature: "\u9332\u753B\u4E00\u89A7", tools: "list-recordings / download-recordings / get-share-link", scopes: ["cloud_recording:read:list_user_recordings"] },
   { feature: "\u6587\u5B57\u8D77\u3053\u3057\u306E\u53D6\u5F97", tools: "download-recordings", scopes: ["cloud_recording:read:meeting_transcript", "cloud_recording:read:list_user_recordings"] },
   { feature: "\u5171\u6709\u8A2D\u5B9A\u306E\u5909\u66F4", tools: "set-share-settings", scopes: ["cloud_recording:update:recording_settings"] },
-  { feature: "\u9332\u753B\u306E\u524A\u9664", tools: "delete-recording", scopes: ["cloud_recording:delete:recording_file"] }
+  // まるごと削除(delete:meeting_recording)が無くても、ファイル単位(delete:recording_file)＋
+  // 録画一覧があれば delete-recording は動く。必須はこの2つだけにする。
+  { feature: "\u9332\u753B\u306E\u524A\u9664", tools: "delete-recording", scopes: ["cloud_recording:delete:recording_file", "cloud_recording:read:list_user_recordings"] }
 ];
 function hasScope(granted, want) {
   const norm = (s) => s.replace(/:admin$/, "");
@@ -33127,6 +33160,10 @@ async function runDoctor() {
         missing.push(s);
       });
     }
+  }
+  if (hasScope(scopes, "cloud_recording:delete:recording_file") && !hasScope(scopes, "cloud_recording:delete:meeting_recording")) {
+    lines.push("      \u203B \u307E\u308B\u3054\u3068\u524A\u9664\u306E\u6A29\u9650\uFF08cloud_recording:delete:meeting_recording\uFF09\u306F");
+    lines.push("        \u7121\u3044\u306E\u3067\u3001\u30D5\u30A1\u30A4\u30EB\u30921\u3064\u305A\u3064\u6D88\u3059\u65B9\u5F0F\u3067\u52D5\u304D\u307E\u3059\uFF08\u7D50\u679C\u306F\u540C\u3058\u3067\u3059\uFF09\u3002");
   }
   if (missing.length) {
     lines.push("");

@@ -276,6 +276,7 @@ async function updateMeeting(
 // ─────────────────────────────────────────────
 
 interface RecordingFile {
+  id?: string;
   file_type: string;
   file_size: number;
   download_url: string;
@@ -622,10 +623,22 @@ async function vimeoQuota() {
   }
 }
 
-/** 録画の削除。ゴミ箱に入るので30日以内なら復元可能。recording:write が必要 */
+/** スコープ不足(4711)かどうか */
+function isScopeError(e: unknown): boolean {
+  return axios.isAxiosError(e) && (e.response?.data as any)?.code === 4711;
+}
+
+/**
+ * 録画の削除。ゴミ箱に入るので30日以内なら復元可能。
+ *
+ * Zoomは「まるごと削除」と「ファイル単位の削除」で必要なスコープが別物で、
+ * 導入マニュアルが案内しているのは後者(cloud_recording:delete:recording_file)だけ。
+ * そのためまるごと削除でスコープ不足になる構成が普通に起きるので、
+ * その時はファイル単位の削除に自動で切り替える。
+ */
 async function deleteRecording(meetingUuid: string) {
   const token = await getAccessToken();
-  const encoded = encodeURIComponent(encodeURIComponent(meetingUuid));
+  const encoded = meetingPathId(meetingUuid);
   try {
     await axios.delete(`${API}/meetings/${encoded}/recordings`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -633,8 +646,39 @@ async function deleteRecording(meetingUuid: string) {
     });
     return true;
   } catch (e) {
-    rethrow(e, '録画削除エラー');
+    if (!isScopeError(e)) rethrow(e, '録画削除エラー');
   }
+
+  // ここから代替ルート: ファイルを1つずつ消す
+  const rec = (await listRecordings(500, 6)).find((r) => r.uuid === meetingUuid);
+  if (!rec) {
+    throw new Error(
+      '録画削除エラー: まるごと削除の権限が無く、代わりに使う録画一覧にも該当の録画が見つかりませんでした（直近6ヶ月外の可能性があります）。'
+    );
+  }
+  const files = rec.recording_files || [];
+  const failed: string[] = [];
+  for (const f of files) {
+    if (!f.id) {
+      failed.push(`${f.file_type}(ID無し)`);
+      continue;
+    }
+    try {
+      await axios.delete(`${API}/meetings/${encoded}/recordings/${f.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { action: 'trash' },
+      });
+    } catch (e) {
+      // 本体を消した時点で連動して消えるファイルがあるため、404は成功扱いにする
+      if (axios.isAxiosError(e) && e.response?.status === 404) continue;
+      if (isScopeError(e)) rethrow(e, '録画削除エラー');
+      failed.push(`${f.file_type}(${axios.isAxiosError(e) ? e.response?.status : e})`);
+    }
+  }
+  if (failed.length) {
+    throw new Error(`録画削除エラー: 一部のファイルを削除できませんでした → ${failed.join(' / ')}`);
+  }
+  return true;
 }
 
 // ─────────────────────────────────────────────
@@ -650,7 +694,9 @@ const FEATURE_SCOPES: { feature: string; tools: string; scopes: string[] }[] = [
   { feature: '録画一覧', tools: 'list-recordings / download-recordings / get-share-link', scopes: ['cloud_recording:read:list_user_recordings'] },
   { feature: '文字起こしの取得', tools: 'download-recordings', scopes: ['cloud_recording:read:meeting_transcript', 'cloud_recording:read:list_user_recordings'] },
   { feature: '共有設定の変更', tools: 'set-share-settings', scopes: ['cloud_recording:update:recording_settings'] },
-  { feature: '録画の削除', tools: 'delete-recording', scopes: ['cloud_recording:delete:recording_file'] },
+  // まるごと削除(delete:meeting_recording)が無くても、ファイル単位(delete:recording_file)＋
+  // 録画一覧があれば delete-recording は動く。必須はこの2つだけにする。
+  { feature: '録画の削除', tools: 'delete-recording', scopes: ['cloud_recording:delete:recording_file', 'cloud_recording:read:list_user_recordings'] },
 ];
 
 /** :admin の有無を無視してスコープを保持しているか判定する */
@@ -710,6 +756,13 @@ async function runDoctor(): Promise<string> {
         missing.push(s);
       });
     }
+  }
+  if (
+    hasScope(scopes, 'cloud_recording:delete:recording_file') &&
+    !hasScope(scopes, 'cloud_recording:delete:meeting_recording')
+  ) {
+    lines.push('      ※ まるごと削除の権限（cloud_recording:delete:meeting_recording）は');
+    lines.push('        無いので、ファイルを1つずつ消す方式で動きます（結果は同じです）。');
   }
   if (missing.length) {
     lines.push('');
