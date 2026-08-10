@@ -32653,6 +32653,7 @@ var ZOOM_CLIENT_ID = requireEnv("ZOOM_CLIENT_ID");
 var ZOOM_CLIENT_SECRET = requireEnv("ZOOM_CLIENT_SECRET");
 var ZOOM_USER_EMAIL = requireEnv("ZOOM_USER_EMAIL");
 var DOWNLOAD_DIR = process.env.ZOOM_DOWNLOAD_DIR || path.join(os.homedir(), "Downloads", "zoom-recordings");
+var ARCHIVE_ROOT = process.env.ZOOM_ARCHIVE_ROOT || "";
 var VIMEO_ACCESS_TOKEN = process.env.VIMEO_ACCESS_TOKEN || "";
 var API = "https://api.zoom.us/v2";
 var VIMEO_API = "https://api.vimeo.com";
@@ -32931,15 +32932,52 @@ var VIMEO_HEADERS = (token) => ({
   Authorization: `Bearer ${token}`,
   Accept: "application/vnd.vimeo.*+json;version=3.4"
 });
-function hasLocalTranscript(topic, startTime) {
-  if (!fs.existsSync(DOWNLOAD_DIR)) return false;
+function findLocalTranscript(topic, startTime) {
   const date3 = new Date(startTime);
   const p = (n) => String(n).padStart(2, "0");
-  const ymd = `${date3.getFullYear()}-${p(date3.getMonth() + 1)}-${p(date3.getDate())}`;
+  const yyyy = date3.getFullYear();
+  const ymd = `${yyyy}-${p(date3.getMonth() + 1)}-${p(date3.getDate())}`;
+  const yymmdd = `${String(yyyy).slice(2)}${p(date3.getMonth() + 1)}${p(date3.getDate())}`;
   const strip = (s) => s.replace(/\s+/g, "");
-  const key = strip(sanitizeFileName(topic)).slice(0, 8);
-  if (!key) return false;
-  return fs.readdirSync(DOWNLOAD_DIR).some((f) => f.endsWith(".vtt") && f.includes(ymd) && strip(f).includes(key));
+  if (fs.existsSync(DOWNLOAD_DIR)) {
+    const key = strip(sanitizeFileName(topic)).slice(0, 8);
+    if (key) {
+      const hit = fs.readdirSync(DOWNLOAD_DIR).find((f) => f.endsWith(".vtt") && f.includes(ymd) && strip(f).includes(key));
+      if (hit) return path.join(DOWNLOAD_DIR, hit);
+    }
+  }
+  if (ARCHIVE_ROOT && fs.existsSync(ARCHIVE_ROOT)) {
+    const keys = topicKeys(topic);
+    let cases;
+    try {
+      cases = fs.readdirSync(ARCHIVE_ROOT);
+    } catch {
+      return null;
+    }
+    for (const c of cases) {
+      const dir = path.join(ARCHIVE_ROOT, c, "context");
+      let files;
+      try {
+        if (!fs.statSync(dir).isDirectory()) continue;
+        files = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      const hit = files.find(
+        (f) => f.startsWith(yymmdd) && f.includes("\u6587\u5B57\u8D77\u3053\u3057") && (keys.length === 0 || keys.some((k) => f.includes(k)))
+      );
+      if (hit) return path.join(dir, hit);
+    }
+  }
+  return null;
+}
+function topicKeys(topic) {
+  const core = topic.replace(/[【】（）()［］\[\]「」\s_-]/g, "").replace(/(ミーティング|ミィーティング|MTG|mtg|ZOOM|Zoom|zoom|打ち合わせ|打合せ|会議|定例|さん|様|の)/g, "");
+  const keys = [];
+  for (let len = 3; len >= 2; len--) {
+    for (let i = 0; i + len <= core.length && i < 8; i++) keys.push(core.slice(i, i + len));
+  }
+  return keys;
 }
 async function uploadToVimeo(params) {
   const vt = requireVimeoToken();
@@ -33659,15 +33697,22 @@ ${paste}`
         if (args?.skipTranscriptCheck !== true) {
           const recordings = await listRecordings(500, 12);
           const rec = recordings.find((r) => r.uuid === uuid2 || String(r.id) === uuid2);
-          if (rec && !hasLocalTranscript(rec.topic, rec.start_time)) {
+          if (rec && !findLocalTranscript(rec.topic, rec.start_time)) {
+            const where = ARCHIVE_ROOT ? `\u30FB\u4E00\u6642\u7F6E\u304D\u5834: ${DOWNLOAD_DIR}
+\u30FB\u4FDD\u7BA1\u5834\u6240: ${ARCHIVE_ROOT}/<\u6848\u4EF6>/context/\uFF08YYMMDD\u2026\u6587\u5B57\u8D77\u3053\u3057\uFF09` : `\u30FB\u4E00\u6642\u7F6E\u304D\u5834: ${DOWNLOAD_DIR}
+\u203B ZOOM_ARCHIVE_ROOT \u304C\u672A\u8A2D\u5B9A\u306E\u305F\u3081\u3001\u6848\u4EF6\u30D5\u30A9\u30EB\u30C0\u5074\u306F\u63A2\u3057\u3066\u3044\u307E\u305B\u3093\u3002
+  \u6574\u5F62\u3057\u3066\u6848\u4EF6\u30D5\u30A9\u30EB\u30C0\u3078\u79FB\u3059\u904B\u7528\u306A\u3089\u3001\u74B0\u5883\u5909\u6570\u306B clients/ \u306E\u30D1\u30B9\u3092\u8A2D\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002`;
             return {
               content: [
                 {
                   type: "text",
                   text: `\u524A\u9664\u3092\u4E2D\u6B62\u3057\u307E\u3057\u305F\u3002
 
-\u300C${rec.topic}\u300D\u306E\u6587\u5B57\u8D77\u3053\u3057\u304C\u624B\u5143\u306B\u3042\u308A\u307E\u305B\u3093\u3002
+\u300C${rec.topic}\u300D\u306E\u6587\u5B57\u8D77\u3053\u3057\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002
 **Zoom\u306E\u9332\u753B\u3092\u6D88\u3059\u3068\u6587\u5B57\u8D77\u3053\u3057\u3082\u4E00\u7DD2\u306B\u6D88\u3048\u307E\u3059\u3002** \u8B70\u4E8B\u9332\u3092\u4F5C\u308C\u306A\u304F\u306A\u308A\u307E\u3059\u3002
+
+\u63A2\u3057\u305F\u5834\u6240:
+${where}
 
 \u5148\u306B download-recordings \u3092 transcriptOnly: true \u3067\u5B9F\u884C\u3057\u3066\u3001
 \u8B70\u4E8B\u9332\u307E\u3067\u4F5C\u3063\u3066\u304B\u3089\u524A\u9664\u3057\u3066\u304F\u3060\u3055\u3044\u3002

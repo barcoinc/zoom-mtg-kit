@@ -46,6 +46,16 @@ const DOWNLOAD_DIR =
   process.env.ZOOM_DOWNLOAD_DIR ||
   path.join(os.homedir(), 'Downloads', 'zoom-recordings');
 
+/**
+ * 文字起こしの「本当の保管場所」。削除の安全装置が見に行く。
+ *
+ * DOWNLOAD_DIR は一時置き場であって保管場所ではない。整形して案件フォルダへ
+ * 移した後は空になるので、そこだけ見ていると **正しく保管したほど誤って止まる**。
+ * ZOOM_ARCHIVE_ROOT に案件フォルダの親（clients/ 相当）を指定すると、
+ * `<root>/<案件>/context/` 配下も探しに行く。
+ */
+const ARCHIVE_ROOT = process.env.ZOOM_ARCHIVE_ROOT || '';
+
 /** Vimeoへの退避を使う場合のみ設定。未設定でも他の機能は動く */
 const VIMEO_ACCESS_TOKEN = process.env.VIMEO_ACCESS_TOKEN || '';
 
@@ -458,23 +468,88 @@ const VIMEO_HEADERS = (token: string) => ({
 });
 
 /**
- * その録画の文字起こしが手元に落ちているか。削除の安全装置に使う。
+ * その録画の文字起こしが手元にあるか。削除の安全装置に使う。
  *
- * 判定は「日付が一致」かつ「トピック名の頭が一致」。
- * 空白の有無で取りこぼさないよう、両方から空白を除いて比べる。
+ * 2か所を見る。どちらかで見つかれば「ある」とみなす。
+ *
+ *  ①一時置き場（DOWNLOAD_DIR）… `YYYY-MM-DD_...vtt`
+ *    日付＋トピック名の頭で厳しめに判定する。
+ *
+ *  ②保管場所（ZOOM_ARCHIVE_ROOT/<案件>/context/）… `YYMMDD_<件名>_文字起こし.*`
+ *    整形時に件名を付け直すためトピック名では照合できない。
+ *    **日付＋「文字起こし」を含むこと**で判定する。
+ *
  * 迷ったら「無い」と判定する（消してしまう方向に倒さない）。
+ * 見つかった場合はそのパスを返し、呼び出し側で提示できるようにする。
  */
-function hasLocalTranscript(topic: string, startTime: string): boolean {
-  if (!fs.existsSync(DOWNLOAD_DIR)) return false;
+function findLocalTranscript(topic: string, startTime: string): string | null {
   const date = new Date(startTime);
   const p = (n: number) => String(n).padStart(2, '0');
-  const ymd = `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  const yyyy = date.getFullYear();
+  const ymd = `${yyyy}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  const yymmdd = `${String(yyyy).slice(2)}${p(date.getMonth() + 1)}${p(date.getDate())}`;
   const strip = (s: string) => s.replace(/\s+/g, '');
-  const key = strip(sanitizeFileName(topic)).slice(0, 8);
-  if (!key) return false;
-  return fs
-    .readdirSync(DOWNLOAD_DIR)
-    .some((f) => f.endsWith('.vtt') && f.includes(ymd) && strip(f).includes(key));
+
+  // ①一時置き場
+  if (fs.existsSync(DOWNLOAD_DIR)) {
+    const key = strip(sanitizeFileName(topic)).slice(0, 8);
+    if (key) {
+      const hit = fs
+        .readdirSync(DOWNLOAD_DIR)
+        .find((f) => f.endsWith('.vtt') && f.includes(ymd) && strip(f).includes(key));
+      if (hit) return path.join(DOWNLOAD_DIR, hit);
+    }
+  }
+
+  // ②保管場所（案件ごとの context/）
+  // 日付だけで判定すると、同じ日に別案件の打ち合わせがあった場合に
+  // 「対象は保存し忘れているのに素通りする」ので、件名も照合する。
+  if (ARCHIVE_ROOT && fs.existsSync(ARCHIVE_ROOT)) {
+    const keys = topicKeys(topic);
+    let cases: string[];
+    try {
+      cases = fs.readdirSync(ARCHIVE_ROOT);
+    } catch {
+      return null;
+    }
+    for (const c of cases) {
+      const dir = path.join(ARCHIVE_ROOT, c, 'context');
+      let files: string[];
+      try {
+        if (!fs.statSync(dir).isDirectory()) continue;
+        files = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      const hit = files.find(
+        (f) =>
+          f.startsWith(yymmdd) &&
+          f.includes('文字起こし') &&
+          (keys.length === 0 || keys.some((k) => f.includes(k))),
+      );
+      if (hit) return path.join(dir, hit);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * トピック名から、ファイル名との照合に使う手がかりを取り出す。
+ *
+ * 「【たなか先生】ZOOMミーティング」→ ["たなか","キタ先","タ先生",…]
+ * 整形時に件名を付け直す（例: `260810_たなかMTG_文字起こし.md`）ため、
+ * 完全一致では当たらない。共通しやすい2〜3文字の断片で照合する。
+ */
+function topicKeys(topic: string): string[] {
+  const core = topic
+    .replace(/[【】（）()［］\[\]「」\s_-]/g, '')
+    .replace(/(ミーティング|ミィーティング|MTG|mtg|ZOOM|Zoom|zoom|打ち合わせ|打合せ|会議|定例|さん|様|の)/g, '');
+  const keys: string[] = [];
+  for (let len = 3; len >= 2; len--) {
+    for (let i = 0; i + len <= core.length && i < 8; i++) keys.push(core.slice(i, i + len));
+  }
+  return keys;
 }
 
 interface VimeoUploadParams {
@@ -1314,15 +1389,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args?.skipTranscriptCheck !== true) {
           const recordings = await listRecordings(500, 12);
           const rec = recordings.find((r) => r.uuid === uuid || String(r.id) === uuid);
-          if (rec && !hasLocalTranscript(rec.topic, rec.start_time)) {
+          if (rec && !findLocalTranscript(rec.topic, rec.start_time)) {
+            const where = ARCHIVE_ROOT
+              ? `・一時置き場: ${DOWNLOAD_DIR}\n・保管場所: ${ARCHIVE_ROOT}/<案件>/context/（YYMMDD…文字起こし）`
+              : `・一時置き場: ${DOWNLOAD_DIR}\n※ ZOOM_ARCHIVE_ROOT が未設定のため、案件フォルダ側は探していません。\n  整形して案件フォルダへ移す運用なら、環境変数に clients/ のパスを設定してください。`;
             return {
               content: [
                 {
                   type: 'text',
                   text:
                     `削除を中止しました。\n\n` +
-                    `「${rec.topic}」の文字起こしが手元にありません。\n` +
+                    `「${rec.topic}」の文字起こしが見つかりません。\n` +
                     `**Zoomの録画を消すと文字起こしも一緒に消えます。** 議事録を作れなくなります。\n\n` +
+                    `探した場所:\n${where}\n\n` +
                     `先に download-recordings を transcriptOnly: true で実行して、\n` +
                     `議事録まで作ってから削除してください。\n\n` +
                     `文字起こしが不要だと判断済みなら skipTranscriptCheck: true を付けて再実行できます。`,
