@@ -641,12 +641,26 @@ async function uploadToVimeo(params: VimeoUploadParams) {
   }
 }
 
+/**
+ * Vimeoの動画IDを取り出す。
+ * 限定公開URL（https://vimeo.com/123456/abcdef）はハッシュが数字で始まることがあり、
+ * 末尾から探すとハッシュ側を拾ってしまうため、必ずホスト名の直後から取る。
+ */
+function vimeoVideoId(input: string): string {
+  const s = String(input ?? '').trim();
+  if (/^\d+$/.test(s)) return s;
+  const m = s.match(/(?:videos?\/|vimeo\.com\/)(\d+)/);
+  if (m) return m[1];
+  throw new Error(
+    `Vimeoの動画IDを読み取れませんでした: ${s}\n` +
+      '動画のURL（https://vimeo.com/123456789）か、数字のIDを渡してください。'
+  );
+}
+
 /** Vimeo側の取り込み・変換の進行状況 */
 async function vimeoStatus(uriOrId: string) {
   const vt = requireVimeoToken();
-  const uri = uriOrId.startsWith('/videos/')
-    ? uriOrId
-    : `/videos/${uriOrId.replace(/^.*\/(\d+).*$/, '$1')}`;
+  const uri = `/videos/${vimeoVideoId(uriOrId)}`;
   try {
     const res = await axios.get(`${VIMEO_API}${uri}`, {
       headers: VIMEO_HEADERS(vt),
@@ -1062,7 +1076,11 @@ const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        video: { type: 'string', description: 'VimeoのURL、動画ID、または /videos/123 形式のURI' },
+        video: {
+          type: 'string',
+          description:
+            'VimeoのURL、動画ID、または /videos/123 形式のURI。限定公開URL（https://vimeo.com/123/abcdef）もそのまま渡せる',
+        },
       },
       required: ['video'],
     },

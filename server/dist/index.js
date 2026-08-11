@@ -33042,9 +33042,19 @@ async function uploadToVimeo(params) {
     throw e;
   }
 }
+function vimeoVideoId(input) {
+  const s = String(input ?? "").trim();
+  if (/^\d+$/.test(s)) return s;
+  const m = s.match(/(?:videos?\/|vimeo\.com\/)(\d+)/);
+  if (m) return m[1];
+  throw new Error(
+    `Vimeo\u306E\u52D5\u753BID\u3092\u8AAD\u307F\u53D6\u308C\u307E\u305B\u3093\u3067\u3057\u305F: ${s}
+\u52D5\u753B\u306EURL\uFF08https://vimeo.com/123456789\uFF09\u304B\u3001\u6570\u5B57\u306EID\u3092\u6E21\u3057\u3066\u304F\u3060\u3055\u3044\u3002`
+  );
+}
 async function vimeoStatus(uriOrId) {
   const vt = requireVimeoToken();
-  const uri = uriOrId.startsWith("/videos/") ? uriOrId : `/videos/${uriOrId.replace(/^.*\/(\d+).*$/, "$1")}`;
+  const uri = `/videos/${vimeoVideoId(uriOrId)}`;
   try {
     const res = await axios_default.get(`${VIMEO_API}${uri}`, {
       headers: VIMEO_HEADERS(vt),
@@ -33406,7 +33416,10 @@ var tools = [
     inputSchema: {
       type: "object",
       properties: {
-        video: { type: "string", description: "Vimeo\u306EURL\u3001\u52D5\u753BID\u3001\u307E\u305F\u306F /videos/123 \u5F62\u5F0F\u306EURI" }
+        video: {
+          type: "string",
+          description: "Vimeo\u306EURL\u3001\u52D5\u753BID\u3001\u307E\u305F\u306F /videos/123 \u5F62\u5F0F\u306EURI\u3002\u9650\u5B9A\u516C\u958BURL\uFF08https://vimeo.com/123/abcdef\uFF09\u3082\u305D\u306E\u307E\u307E\u6E21\u305B\u308B"
+        }
       },
       required: ["video"]
     }
