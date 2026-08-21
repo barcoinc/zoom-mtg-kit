@@ -4,7 +4,10 @@
  * ここが壊れると **打ち合わせの記録が永久に失われる**（Zoomの録画を消すと文字起こしも消える）。
  * 「動くはず」で済ませてよい箇所ではないので、実際にフォルダを作って通しで確かめる。
  *
- *   node --test server/test/
+ *   npm test
+ *
+ * 試験の対象は **配布されるビルド済みファイル（dist/index.js）そのもの**。
+ * src を直したら `npm run build` してから試験すること。
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,8 +29,8 @@ process.env.ZOOM_DOWNLOAD_DIR = EMPTY_DOWNLOADS;
 
 const { findLocalTranscript } = await import('../dist/index.js');
 
-/** Zoomが返す start_time はUTC。開催時刻(JST)から9時間引いた形で書く */
-const JST = (s) => s;
+// 以下の日時は、Zoomが返すのと同じ **UTC**。
+// 例: 2026-08-19T06:01:28Z ＝ 日本時間 8/19 15:01（ファイル名は日本時間で付く）
 
 const write = (rel, body = '本文') => {
   const full = path.join(ROOT, rel);
@@ -56,32 +59,32 @@ before(() => {
 after(() => fs.rmSync(ROOT, { recursive: true, force: true }));
 
 test('ミーティングIDで案件を特定して、その中の文字起こしを見つける', () => {
-  const hit = findLocalTranscript('みどり商事様 お打ち合わせ', JST('2026-08-19T06:01:28Z'), 1234567890);
+  const hit = findLocalTranscript('みどり商事様 お打ち合わせ', '2026-08-19T06:01:28Z', 1234567890);
   assert.ok(hit?.endsWith('みどり商事様/meetings/2026-08-19_文字起こし.md'), `見つからない: ${hit}`);
 });
 
 test('【最重要】保存し忘れた案件を、同じ日の他案件のファイルで代用しない', () => {
   // ここが緩むと「別の案件の議事録は取れているから消してよい」と誤判定し、記録が消える
-  const hit = findLocalTranscript('あおぞら工房様 お打ち合わせ', JST('2026-08-19T07:02:36Z'), 2345678901);
+  const hit = findLocalTranscript('あおぞら工房様 お打ち合わせ', '2026-08-19T07:02:36Z', 2345678901);
   assert.equal(hit, null);
 });
 
 test('案件フォルダの形を変えても働く（context/ ・ YYMMDD）', () => {
-  const hit = findLocalTranscript('【たなか先生】ZOOMミーティング', JST('2026-08-10T10:59:48Z'), 3456789012);
+  const hit = findLocalTranscript('【たなか先生】ZOOMミーティング', '2026-08-10T10:59:48Z', 3456789012);
   assert.ok(hit?.endsWith('260810_たなかMTG_文字起こし.md'), `見つからない: ${hit}`);
 });
 
 test('ミーティングIDを書き忘れても、件名の手がかりで見つける', () => {
-  const hit = findLocalTranscript('さくら不動産 定例', JST('2026-08-12T07:42:38Z'), 999999);
+  const hit = findLocalTranscript('さくら不動産 定例', '2026-08-12T07:42:38Z', 999999);
   assert.ok(hit?.endsWith('さくら不動産/meetings/2026-08-12_文字起こし.md'), `見つからない: ${hit}`);
 });
 
 test('どこにも無ければ「無い」と答える（迷ったら消させない）', () => {
-  const hit = findLocalTranscript('ヤマダ工務店 打合せ', JST('2026-08-19T01:00:00Z'), 111111);
+  const hit = findLocalTranscript('ヤマダ工務店 打合せ', '2026-08-19T01:00:00Z', 111111);
   assert.equal(hit, null);
 });
 
 test('日付が違うファイルは当てにしない', () => {
-  const hit = findLocalTranscript('みどり商事様 お打ち合わせ', JST('2026-08-25T06:01:28Z'), 1234567890);
+  const hit = findLocalTranscript('みどり商事様 お打ち合わせ', '2026-08-25T06:01:28Z', 1234567890);
   assert.equal(hit, null);
 });
