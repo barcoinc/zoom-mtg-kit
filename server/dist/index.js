@@ -3651,49 +3651,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative, options, skipNormalization) {
+    function resolveComponent(base, relative2, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse3(serialize(base, options), options);
-        relative = parse3(serialize(relative, options), options);
+        relative2 = parse3(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative.scheme) {
-        target.scheme = relative.scheme;
-        target.userinfo = relative.userinfo;
-        target.host = relative.host;
-        target.port = relative.port;
-        target.path = removeDotSegments(relative.path || "");
-        target.query = relative.query;
+      if (!options.tolerant && relative2.scheme) {
+        target.scheme = relative2.scheme;
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
-          target.userinfo = relative.userinfo;
-          target.host = relative.host;
-          target.port = relative.port;
-          target.path = removeDotSegments(relative.path || "");
-          target.query = relative.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target.userinfo = relative2.userinfo;
+          target.host = relative2.host;
+          target.port = relative2.port;
+          target.path = removeDotSegments(relative2.path || "");
+          target.query = relative2.query;
         } else {
-          if (!relative.path) {
+          if (!relative2.path) {
             target.path = base.path;
-            if (relative.query !== void 0) {
-              target.query = relative.query;
+            if (relative2.query !== void 0) {
+              target.query = relative2.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative.path[0] === "/") {
-              target.path = removeDotSegments(relative.path);
+            if (relative2.path[0] === "/") {
+              target.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative.path;
+                target.path = "/" + relative2.path;
               } else if (!base.path) {
-                target.path = relative.path;
+                target.path = relative2.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative.query;
+            target.query = relative2.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -3701,7 +3701,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative.fragment;
+      target.fragment = relative2.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -18706,8 +18706,8 @@ var require_follow_redirects = __commonJS({
       }
       return parsed;
     }
-    function resolveUrl(relative, base) {
-      return useNativeURL ? new URL2(relative, base) : parseUrl2(url2.resolve(base, relative));
+    function resolveUrl(relative2, base) {
+      return useNativeURL ? new URL2(relative2, base) : parseUrl2(url2.resolve(base, relative2));
     }
     function validateUrl(input) {
       if (/^\[/.test(input.hostname) && !/^\[[:0-9a-f]+\]$/i.test(input.hostname)) {
@@ -19014,8 +19014,8 @@ var require_main = __commonJS({
         const shortPaths = [];
         for (const filePath of optionPaths) {
           try {
-            const relative = path2.relative(process.cwd(), filePath);
-            shortPaths.push(relative);
+            const relative2 = path2.relative(process.cwd(), filePath);
+            shortPaths.push(relative2);
           } catch (e) {
             if (debug) {
               _debug(`failed to load ${filePath} ${e.message}`);
@@ -32932,7 +32932,7 @@ var VIMEO_HEADERS = (token) => ({
   Authorization: `Bearer ${token}`,
   Accept: "application/vnd.vimeo.*+json;version=3.4"
 });
-function findLocalTranscript(topic, startTime) {
+function findLocalTranscript(topic, startTime, meetingId) {
   const date3 = new Date(startTime);
   const p = (n) => String(n).padStart(2, "0");
   const yyyy = date3.getFullYear();
@@ -32942,31 +32942,62 @@ function findLocalTranscript(topic, startTime) {
   if (fs.existsSync(DOWNLOAD_DIR)) {
     const key = strip(sanitizeFileName(topic)).slice(0, 8);
     if (key) {
-      const hit = fs.readdirSync(DOWNLOAD_DIR).find((f) => f.endsWith(".vtt") && f.includes(ymd) && strip(f).includes(key));
-      if (hit) return path.join(DOWNLOAD_DIR, hit);
+      const hit2 = fs.readdirSync(DOWNLOAD_DIR).find((f) => f.endsWith(".vtt") && f.includes(ymd) && strip(f).includes(key));
+      if (hit2) return path.join(DOWNLOAD_DIR, hit2);
     }
   }
-  if (ARCHIVE_ROOT && fs.existsSync(ARCHIVE_ROOT)) {
-    const keys = topicKeys(topic);
-    let cases;
-    try {
-      cases = fs.readdirSync(ARCHIVE_ROOT);
-    } catch {
-      return null;
-    }
-    for (const c of cases) {
-      const dir = path.join(ARCHIVE_ROOT, c, "context");
-      let files;
+  if (!ARCHIVE_ROOT || !fs.existsSync(ARCHIVE_ROOT)) return null;
+  const isTranscript = (name) => (name.includes(ymd) || name.startsWith(yymmdd)) && /文字起こし|transcript/i.test(name);
+  const caseDir = meetingId ? findCaseDirByMeetingId(ARCHIVE_ROOT, String(meetingId)) : null;
+  if (caseDir) {
+    return walkFiles(caseDir).find((f) => isTranscript(path.basename(f))) || null;
+  }
+  const candidates = walkFiles(ARCHIVE_ROOT).filter((f) => isTranscript(path.basename(f)));
+  if (candidates.length === 0) return null;
+  const keys = topicKeys(topic);
+  if (keys.length === 0) return candidates[0];
+  const hit = candidates.find((f) => {
+    const rel = path.relative(ARCHIVE_ROOT, f);
+    return keys.some((k) => rel.includes(k));
+  });
+  return hit || null;
+}
+function walkFiles(root, depth = 0) {
+  if (depth > 4) return [];
+  const skip = /* @__PURE__ */ new Set(["node_modules", ".git", ".venv", "dist", "__pycache__"]);
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of entries) {
+    if (e.name.startsWith(".") || skip.has(e.name)) continue;
+    const full = path.join(root, e.name);
+    if (e.isDirectory()) out.push(...walkFiles(full, depth + 1));
+    else out.push(full);
+  }
+  return out;
+}
+function findCaseDirByMeetingId(root, meetingId) {
+  const id = meetingId.replace(/\s/g, "");
+  if (!id) return null;
+  let cases;
+  try {
+    cases = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const c of cases) {
+    if (!c.isDirectory() || c.name.startsWith(".")) continue;
+    const dir = path.join(root, c.name);
+    const md = walkFiles(dir, 2).filter((f) => f.endsWith(".md"));
+    for (const f of md) {
       try {
-        if (!fs.statSync(dir).isDirectory()) continue;
-        files = fs.readdirSync(dir);
+        if (fs.readFileSync(f, "utf-8").replace(/\s/g, "").includes(id)) return dir;
       } catch {
-        continue;
       }
-      const hit = files.find(
-        (f) => f.startsWith(yymmdd) && f.includes("\u6587\u5B57\u8D77\u3053\u3057") && (keys.length === 0 || keys.some((k) => f.includes(k)))
-      );
-      if (hit) return path.join(dir, hit);
     }
   }
   return null;
@@ -33710,11 +33741,11 @@ ${paste}`
         if (args?.skipTranscriptCheck !== true) {
           const recordings = await listRecordings(500, 12);
           const rec = recordings.find((r) => r.uuid === uuid2 || String(r.id) === uuid2);
-          if (rec && !findLocalTranscript(rec.topic, rec.start_time)) {
+          if (rec && !findLocalTranscript(rec.topic, rec.start_time, rec.id)) {
             const where = ARCHIVE_ROOT ? `\u30FB\u4E00\u6642\u7F6E\u304D\u5834: ${DOWNLOAD_DIR}
-\u30FB\u4FDD\u7BA1\u5834\u6240: ${ARCHIVE_ROOT}/<\u6848\u4EF6>/context/\uFF08YYMMDD\u2026\u6587\u5B57\u8D77\u3053\u3057\uFF09` : `\u30FB\u4E00\u6642\u7F6E\u304D\u5834: ${DOWNLOAD_DIR}
+\u30FB\u4FDD\u7BA1\u5834\u6240: ${ARCHIVE_ROOT} \u306E\u914D\u4E0B\uFF08\u30D5\u30A1\u30A4\u30EB\u540D\u306B\u65E5\u4ED8\u3068\u300C\u6587\u5B57\u8D77\u3053\u3057\u300D\u304C\u8981\u308A\u307E\u3059\uFF09` : `\u30FB\u4E00\u6642\u7F6E\u304D\u5834: ${DOWNLOAD_DIR}
 \u203B ZOOM_ARCHIVE_ROOT \u304C\u672A\u8A2D\u5B9A\u306E\u305F\u3081\u3001\u6848\u4EF6\u30D5\u30A9\u30EB\u30C0\u5074\u306F\u63A2\u3057\u3066\u3044\u307E\u305B\u3093\u3002
-  \u6574\u5F62\u3057\u3066\u6848\u4EF6\u30D5\u30A9\u30EB\u30C0\u3078\u79FB\u3059\u904B\u7528\u306A\u3089\u3001\u74B0\u5883\u5909\u6570\u306B clients/ \u306E\u30D1\u30B9\u3092\u8A2D\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002`;
+  \u6574\u5F62\u3057\u3066\u6848\u4EF6\u30D5\u30A9\u30EB\u30C0\u3078\u79FB\u3059\u904B\u7528\u306A\u3089\u3001\u74B0\u5883\u5909\u6570\u306B\u6848\u4EF6\u30D5\u30A9\u30EB\u30C0\u306E\u89AA\u306E\u30D1\u30B9\u3092\u8A2D\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002`;
             return {
               content: [
                 {
@@ -33760,10 +33791,15 @@ async function main() {
   await server.connect(new StdioServerTransport());
   console.error("zoom-mtg-kit MCP server started");
 }
-main().catch((error2) => {
-  console.error("Fatal error:", error2);
-  process.exit(1);
-});
+if (process.env.ZOOM_KIT_TEST !== "1") {
+  main().catch((error2) => {
+    console.error("Fatal error:", error2);
+    process.exit(1);
+  });
+}
+export {
+  findLocalTranscript
+};
 /*! Bundled license information:
 
 mime-db/index.js:
