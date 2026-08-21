@@ -116,7 +116,7 @@ if (usedGb >= limitGb * WARN_RATIO) {
     `[Zoom容量] 使用 ${usedGb.toFixed(2)}GB / 上限 ${limitGb}GB（${pct}%）。上限が近いので、` +
     `ユーザーに「録画を整理するか」を聞いてください。大きい順: ` +
     top.map((t) => `${t.topic}(${t.date}) ${t.gb.toFixed(2)}GB${t.hasTranscript ? '・文字起こし有' : '・文字起こし無'}`).join(' / ') +
-    `。削除は必ず確認を取り、文字起こしを該当クライアントの meetings/ に保存してから消すこと。\n`
+    `。削除は必ず確認を取り、文字起こしと議事録を該当案件のフォルダに保存してから消すこと。\n`
 }
 
 try {

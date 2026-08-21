@@ -51,8 +51,8 @@ const DOWNLOAD_DIR =
  *
  * DOWNLOAD_DIR は一時置き場であって保管場所ではない。整形して案件フォルダへ
  * 移した後は空になるので、そこだけ見ていると **正しく保管したほど誤って止まる**。
- * ZOOM_ARCHIVE_ROOT に案件フォルダの親（clients/ 相当）を指定すると、
- * `<root>/<案件>/context/` 配下も探しに行く。
+ * ZOOM_ARCHIVE_ROOT に案件フォルダの親を指定すると、その配下を再帰で探す。
+ * **フォルダの形は決め打ちしない**（利用者が自由に作り替えてよい土台にするため）。
  */
 const ARCHIVE_ROOT = process.env.ZOOM_ARCHIVE_ROOT || '';
 
@@ -475,14 +475,23 @@ const VIMEO_HEADERS = (token: string) => ({
  *  ①一時置き場（DOWNLOAD_DIR）… `YYYY-MM-DD_...vtt`
  *    日付＋トピック名の頭で厳しめに判定する。
  *
- *  ②保管場所（ZOOM_ARCHIVE_ROOT/<案件>/context/）… `YYMMDD_<件名>_文字起こし.*`
- *    整形時に件名を付け直すためトピック名では照合できない。
- *    **日付＋「文字起こし」を含むこと**で判定する。
+ *  ②保管場所（ZOOM_ARCHIVE_ROOT 配下）… 再帰で探す。
+ *    **フォルダの形は決め打ちしない。** 案件フォルダの作りは利用者が自由に変えてよい土台なので、
+ *    `context/` のような特定の階層を前提にすると、形を変えた人ほど誤って止まる。
+ *
+ *    どの案件の録画かは、まず**ミーティングIDで確定させる**。
+ *    案件フォルダの `Zoomリンク.md` にIDが書いてあれば、その案件フォルダの中だけを見る
+ *    （＝別案件の同じ日のファイルを自分のものと誤認しない）。
+ *    IDで確定できない時だけ、件名の手がかりで絞り込む。
  *
  * 迷ったら「無い」と判定する（消してしまう方向に倒さない）。
  * 見つかった場合はそのパスを返し、呼び出し側で提示できるようにする。
  */
-function findLocalTranscript(topic: string, startTime: string): string | null {
+function findLocalTranscript(
+  topic: string,
+  startTime: string,
+  meetingId?: string | number,
+): string | null {
   const date = new Date(startTime);
   const p = (n: number) => String(n).padStart(2, '0');
   const yyyy = date.getFullYear();
@@ -501,36 +510,87 @@ function findLocalTranscript(topic: string, startTime: string): string | null {
     }
   }
 
-  // ②保管場所（案件ごとの context/）
-  // 日付だけで判定すると、同じ日に別案件の打ち合わせがあった場合に
-  // 「対象は保存し忘れているのに素通りする」ので、件名も照合する。
-  if (ARCHIVE_ROOT && fs.existsSync(ARCHIVE_ROOT)) {
-    const keys = topicKeys(topic);
-    let cases: string[];
-    try {
-      cases = fs.readdirSync(ARCHIVE_ROOT);
-    } catch {
-      return null;
-    }
-    for (const c of cases) {
-      const dir = path.join(ARCHIVE_ROOT, c, 'context');
-      let files: string[];
-      try {
-        if (!fs.statSync(dir).isDirectory()) continue;
-        files = fs.readdirSync(dir);
-      } catch {
-        continue;
-      }
-      const hit = files.find(
-        (f) =>
-          f.startsWith(yymmdd) &&
-          f.includes('文字起こし') &&
-          (keys.length === 0 || keys.some((k) => f.includes(k))),
-      );
-      if (hit) return path.join(dir, hit);
-    }
+  // ②保管場所
+  if (!ARCHIVE_ROOT || !fs.existsSync(ARCHIVE_ROOT)) return null;
+
+  /** その日の文字起こしファイルか。日付の書き方は2通り許す（YYYY-MM-DD / YYMMDD） */
+  const isTranscript = (name: string) =>
+    (name.includes(ymd) || name.startsWith(yymmdd)) &&
+    /文字起こし|transcript/i.test(name);
+
+  // 案件フォルダを、まずミーティングIDで確定させる
+  const caseDir = meetingId ? findCaseDirByMeetingId(ARCHIVE_ROOT, String(meetingId)) : null;
+  if (caseDir) {
+    // どの案件かは分かっている。**その中に無ければ「無い」**（他案件のファイルで代用しない）
+    return walkFiles(caseDir).find((f) => isTranscript(path.basename(f))) || null;
   }
 
+  // IDで確定できない場合。全体から候補を集め、件名の手がかりで絞る。
+  // 日付だけで判定すると、同じ日に別案件の打ち合わせがあった時に
+  // 「対象は保存し忘れているのに素通りする」ので、必ず手がかりと突き合わせる。
+  const candidates = walkFiles(ARCHIVE_ROOT).filter((f) => isTranscript(path.basename(f)));
+  if (candidates.length === 0) return null;
+
+  const keys = topicKeys(topic);
+  if (keys.length === 0) return candidates[0];
+
+  // 手がかりは**ファイル名だけでなくフォルダ名でも照合する**。
+  // 案件名がフォルダ側にあり、ファイル名は日付だけ、という作りが普通にあるため。
+  const hit = candidates.find((f) => {
+    const rel = path.relative(ARCHIVE_ROOT, f);
+    return keys.some((k) => rel.includes(k));
+  });
+  return hit || null;
+}
+
+/** 配下のファイルを再帰で集める。深すぎる階層と重いフォルダは見ない */
+function walkFiles(root: string, depth = 0): string[] {
+  if (depth > 4) return [];
+  const skip = new Set(['node_modules', '.git', '.venv', 'dist', '__pycache__']);
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const e of entries) {
+    if (e.name.startsWith('.') || skip.has(e.name)) continue;
+    const full = path.join(root, e.name);
+    if (e.isDirectory()) out.push(...walkFiles(full, depth + 1));
+    else out.push(full);
+  }
+  return out;
+}
+
+/**
+ * ミーティングIDが書かれた案件フォルダを探す。
+ *
+ * 各案件の `Zoomリンク.md` に**ミーティングIDを書く**のが運用ルール。
+ * これがあると「この録画はこの案件のもの」と一意に決まるので、
+ * 名前が似た案件・改名した案件でも取り違えない。
+ */
+function findCaseDirByMeetingId(root: string, meetingId: string): string | null {
+  const id = meetingId.replace(/\s/g, '');
+  if (!id) return null;
+  let cases: fs.Dirent[];
+  try {
+    cases = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const c of cases) {
+    if (!c.isDirectory() || c.name.startsWith('.')) continue;
+    const dir = path.join(root, c.name);
+    const md = walkFiles(dir, 2).filter((f) => f.endsWith('.md'));
+    for (const f of md) {
+      try {
+        if (fs.readFileSync(f, 'utf-8').replace(/\s/g, '').includes(id)) return dir;
+      } catch {
+        /* 読めないファイルは飛ばす */
+      }
+    }
+  }
   return null;
 }
 
@@ -1407,10 +1467,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args?.skipTranscriptCheck !== true) {
           const recordings = await listRecordings(500, 12);
           const rec = recordings.find((r) => r.uuid === uuid || String(r.id) === uuid);
-          if (rec && !findLocalTranscript(rec.topic, rec.start_time)) {
+          if (rec && !findLocalTranscript(rec.topic, rec.start_time, rec.id)) {
             const where = ARCHIVE_ROOT
-              ? `・一時置き場: ${DOWNLOAD_DIR}\n・保管場所: ${ARCHIVE_ROOT}/<案件>/context/（YYMMDD…文字起こし）`
-              : `・一時置き場: ${DOWNLOAD_DIR}\n※ ZOOM_ARCHIVE_ROOT が未設定のため、案件フォルダ側は探していません。\n  整形して案件フォルダへ移す運用なら、環境変数に clients/ のパスを設定してください。`;
+              ? `・一時置き場: ${DOWNLOAD_DIR}\n・保管場所: ${ARCHIVE_ROOT} の配下（ファイル名に日付と「文字起こし」が要ります）`
+              : `・一時置き場: ${DOWNLOAD_DIR}\n※ ZOOM_ARCHIVE_ROOT が未設定のため、案件フォルダ側は探していません。\n  整形して案件フォルダへ移す運用なら、環境変数に案件フォルダの親のパスを設定してください。`;
             return {
               content: [
                 {
@@ -1456,7 +1516,13 @@ async function main() {
   console.error('zoom-mtg-kit MCP server started');
 }
 
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+// 試験からは import して関数だけ確かめたいので、その時はサーバーを起動しない
+if (process.env.ZOOM_KIT_TEST !== '1') {
+  main().catch((error) => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
+}
+
+// 削除の安全装置は「消したら戻らない」箇所なので、試験から直接確かめられるようにしておく
+export { findLocalTranscript };
